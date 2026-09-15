@@ -1,0 +1,106 @@
+# Hunyuan3D 2.1 Async API
+
+FastAPI service that takes an input image, runs Hunyuan3D 2.1's image-to-3D
+pipeline (shape DiT → PBR texture), exports **GLB**, stores it on disk, and
+exposes **async job status** — tuned to run on a 14.6 GB T4.
+
+## Why this fits a T4
+
+Hunyuan3D 2.1's weights are ~10 GB (DiT) + ~21 GB (Paint / texture). A 14.6 GB
+T4 cannot hold both, so the pipeline serializes them:
+
+```text
+──── preprocess ──── shape (DiT) ──── offload to CPU ──── texture (Paint) ──── GLB
+                     ↑ load 10 GB ↑                          ↑ load ~11 GB ↑
+```
+
+Each stage is loaded under a GPU budget lock, runs, then is force-moved back to
+CPU (`module.to("cpu")` + `torch.cuda.empty_cache()`) before the next loads.
+`enable_model_cpu_offload()` (accelerate hooks) is additionally applied when the
+upstream bindings offer it, so intra-stage spill is handled by the framework.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/generate` | Submit a job (multipart file, base64 form field, or JSON body). Returns `202` + `{job_id}`. |
+| `GET` | `/v1/jobs/{id}` | Job status: `status`, `progress`, `stage`, `error`, `result_url`. |
+| `GET` | `/v1/jobs/{id}/result` | Download the GLB (`model/gltf-binary`). |
+| `GET` | `/v1/jobs/{id}/thumbnail` | PNG thumbnail render (pyrender if installed). |
+| `GET` | `/v1/jobs` | List recent jobs. |
+| `POST` | `/v1/jobs/{id}/cancel` | Cancel a queued job. |
+| `GET` | `/health` | GPU name, VRAM, active jobs, queue depth. |
+
+Full OpenAPI docs at `/docs`.
+
+## Quick start
+
+```bash
+# 1. Install Python deps
+pip install -r requirements.txt
+
+# 2. Clone + build Hunyuan3D 2.1 (reference repo layout must sit beside this
+#    service so `hy3dshape`/`hy3dpaint` are importable, or set PYTHONPATH).
+git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git
+cd Hunyuan3D-2.1/hy3dpaint/custom_rasterizer && python setup.py install
+cd ../..
+
+# 3. Copy env config and run
+cp .env.example .env
+python -m app.server            # or: bash run.sh
+```
+
+Weights download from HuggingFace on first job `tencent/Hunyuan3D-Shape-v2-1`
+(+ the 2.1 texture weights).
+
+### Submit a job
+
+```bash
+# file upload
+curl -X POST http://localhost:8080/v1/generate \
+  -F "file=@chair.png" -F "enable_texture=true"
+
+# base64
+curl -X POST http://localhost:8080/v1/generate \
+  -H "Content-Type: application/json" \
+  -d '{"image":"<base64>","octree_resolution":256}'
+```
+
+### Poll
+
+```bash
+curl -s http://localhost:8080/v1/jobs/<job_id>
+# {"status":"running","stage":"texture","progress":0.8,...}
+
+curl -sL http://localhost:8080/v1/jobs/<job_id>/result -o out.glb
+```
+
+## Memory / throughput knobs (`.env`)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `HY3D_ENABLE_TEXTURE` | `1` | `0` → shape-only, ~10 GB peak, ~3× faster |
+| `HY3D_STEPS` | `30` | `5` if using the Turbo checkpoint |
+| `HY3D_OCTREE` | `256` | lower = smaller mesh, less decode VRAM |
+| `HY3D_VAE_CHUNKS` | `8000` | lower = less peak VRAM during VAE decode |
+| `HY3D_TEX_RES` / `HY3D_TEX_VIEWS` | `512` / `6` | texture quality vs. time |
+| `HY3D_MAX_ACTIVE_JOBS` | `1` | keep `1` (shape stage is not reentrant) |
+| `HY3D_VRAM_GB_*` | per-stage | VRAM budgets used by the guard rails |
+
+## Notes
+
+- The worker executes the blocking CUDA work in a background thread (`asyncio.to_thread`);
+  HTTP requests stay responsive during a run.
+- Job metadata + GLB are persisted under `outputs/` (configurable) and survive restarts.
+- v2.0 (`hy3dgen` package) is auto-detected as a fallback if the 2.1 bindings
+  aren't installed; the same API and offloading strategy apply.
+
+## Docker
+
+```bash
+docker build -t hunyuan3d-api .
+docker run --gpus '"device=0"' -p 8080:8080 \
+  -v "$(pwd)/outputs:/data" hunyuan3d-api
+```
+
+The image clones Hunyuan3D-2.1 and compiles its custom rasterizer during build.
