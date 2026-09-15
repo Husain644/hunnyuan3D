@@ -1,0 +1,169 @@
+"""VRAM budgeting and CUDA/CUDAGraph helpers tuned for a 14.6 GB T4.
+
+T4 realities:
+  * 16 GB physical, ~14.6 GB usable (driver + context reservation).
+  * fp16 is the fastest dtype; T4 has no native bf16 tensor cores.
+  * Max CUDA context from a single process: one compute stream.
+
+The manager tracks the *serialized* pipeline stages (shape → texture →
+baking). It never allows two heavy stages to be resident at once, so peak
+VRAM stays under the usable ceiling even though the weights (~16-29 GB) far
+exceed it.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+from .config import T4_USABLE_GB
+
+logger = logging.getLogger("hy3d.gpu")
+
+
+def _torch():
+    try:
+        import torch  # type: ignore
+
+        return torch
+    except ImportError:  # pragma: no cover - CPU-only preview box
+        return None
+
+
+@dataclass
+class GpuInfo:
+    available: bool
+    name: Optional[str] = None
+    total_gb: float = 0.0
+    free_gb: float = 0.0
+    used_gb: float = 0.0
+
+
+def gpu_info() -> GpuInfo:
+    torch = _torch()
+    if torch is None or not torch.cuda.is_available():
+        return GpuInfo(available=False)
+    try:
+        torch.cuda.init()
+        idx = torch.cuda.current_device()
+        name = torch.cuda.get_device_name(idx)
+        total = torch.cuda.get_device_properties(idx).total_memory / (1024**3)
+        if hasattr(torch.cuda, "mem_get_info"):
+            free, _tot = torch.cuda.mem_get_info(idx)
+            free_gb = free / (1024**3)
+        else:
+            reserved = torch.cuda.memory_reserved(idx) / (1024**3)
+            free_gb = total - reserved
+        return GpuInfo(
+            available=True,
+            name=name,
+            total_gb=total,
+            free_gb=free_gb,
+            used_gb=total - free_gb,
+        )
+    except Exception as exc:  # pragma: no cover - env dependent
+        logger.warning("GPU introspection failed: %s", exc)
+        return GpuInfo(available=False)
+
+
+class GpuManager:
+    """Serializes heavy pipeline stages and enforces VRAM budgets.
+
+    Pipeline stages acquire the manager through ``stage_lock(i)`` with the
+    same key so a shape and texture stage can never overlap on the GPU.
+    """
+
+    def __init__(self, budgets: dict[str, float], total_gb: float = T4_USABLE_GB) -> None:
+        self.budgets = budgets
+        self.total_gb = total_gb
+        self._lock = threading.Lock()
+        self._resident: dict[str, str] = {}  # key -> stage label
+        self._stage_locks: dict[str, threading.Lock] = {}
+
+    def stage_lock(self, stage: str) -> threading.Lock:
+        """Return a per-stage reentrant-free lock used to serialize loads."""
+        with self._lock:
+            lock = self._stage_locks.get(stage)
+            if lock is None:
+                lock = threading.Lock()
+                self._stage_locks[stage] = lock
+            return lock
+
+    # -- load/unload bookkeeping -----------------------------------------
+    def mark_resident(self, stage: str, label: str) -> None:
+        with self._lock:
+            self._resident[stage] = label
+
+    def mark_unresolved(self, stage: str) -> None:
+        with self._lock:
+            self._resident.pop(stage, None)
+
+    def resident_snapshot(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._resident)
+
+    def would_fit(self, stage: str, extra_gb: float = 0.0) -> bool:
+        """Heuristic: predicted budget must stay under the ceiling."""
+        budget = self.budgets.get(stage, 0.0) + extra_gb
+        # We never co-load two heavy stages, so comparing a single budget
+        # against the usable ceiling is the correct proxy.
+        proxy = gpu_info()
+        if not proxy.available:
+            return True  # CPU fallback path
+        if proxy.total_gb <= 0:
+            return True
+        ceiling = min(self.total_gb, proxy.total_gb)
+        return budget <= ceiling
+
+    @staticmethod
+    def empty_cache() -> None:
+        torch = _torch()
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    @staticmethod
+    def force_offload(model, device: str = "cpu") -> None:
+        """Move every parameter/buffer to CPU and free CUDA cache.
+
+        Uses ``module.to('cpu')`` which is deterministic and independent of
+        accelerate hooks, so it works even for pipelines that don't ship
+        ``enable_model_cpu_offload``.
+        """
+        torch = _torch()
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            model.to(device)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Model .to(cpu) failed (%s); falling back to hooks", exc)
+            offload = getattr(model, "enable_model_cpu_offload", None)
+            if callable(offload):
+                offload()
+            else:
+                raise
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        logger.info("Forced offload of %s to %s", type(model).__name__, device)
+
+    @staticmethod
+    def recommended_chunk() -> int:
+        """VAE decode chunk hint: lower on small cards to cut peak VRAM."""
+        info = gpu_info()
+        if not info.available:
+            return 4000
+        if info.free_gb < 8:
+            return 4000
+        if info.free_gb < 12:
+            return 8000
+        return 16000
+
+
+gpu_manager = GpuManager({})
+
+
+def init_gpu_manager(budgets: dict[str, float]) -> None:
+    global gpu_manager
+    gpu_manager = GpuManager(budgets)

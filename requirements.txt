@@ -1,0 +1,23 @@
+python-dotenv>=1.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pillow>=10.0
+numpy>=1.26
+torch>=2.4
+torchvision>=0.19
+accelerate>=0.30
+trimesh>=4.0
+diffusers>=0.28
+einops
+omegaconf
+tqdm
+python-multipart>=0.0.9
+# Optional texture + postprocess deps (v2.1 needs the custom rasterizer built
+# from source under hy3dpaint/custom_rasterizer).
+opencv-python-headless>=4.9
+xatlas>=0.0.9
+pygltflib>=1.16
+rembg>=2.0
+onnxruntime-gpu>=1.17
+pymeshlab>=2023.12
