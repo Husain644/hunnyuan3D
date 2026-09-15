@@ -1,0 +1,46 @@
+# requirements.colab.txt — Colab-optimized dependency list.
+#
+# PyTorch (torch / torchvision / torchaudio) is NOT listed here; the setup
+# script detects and installs the correct wheel separately (never removes an
+# existing Colab CUDA build).  See scripts/colab_setup.sh.
+#
+# Packages that are never needed: bpy, cupy-cuda12x, open3d, pymeshlab,
+# deepspeed, tb_nightly, basicsr, realesrgan, configargparse.
+
+# --- core service ---
+python-dotenv>=1.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+python-multipart>=0.0.9
+pillow>=10.0
+numpy>=1.26
+
+# --- model / inference (eager) ---
+huggingface-hub>=0.23
+transformers==4.46.0
+diffusers==0.30.0
+accelerate>=0.30
+safetensors>=0.4
+einops
+omegaconf
+pyyaml
+scipy
+tqdm
+
+# --- GLB export ---
+trimesh>=4.0
+xatlas>=0.0.9
+pygltflib>=1.16
+
+# --- rasterizer build (only when HY3D_ENABLE_TEXTURE=1) ---
+ninja>=1.11
+pybind11>=2.12
+
+# --- background removal (only when HY3D_ENABLE_REMBG=1) ---
+# install onnxruntime-gpu for best perf; onnxruntime works on CPU.
+rembg>=2.0
+onnxruntime-gpu>=1.17
+
+# --- OpenCV (texture export) ---
+opencv-python-headless>=4.9

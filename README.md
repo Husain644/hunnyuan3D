@@ -50,8 +50,8 @@ cp .env.example .env
 python -m app.server            # or: bash run.sh
 ```
 
-Weights download from HuggingFace on first job `tencent/Hunyuan3D-Shape-v2-1`
-(+ the 2.1 texture weights).
+Weights download from HuggingFace on first job from the unified repo
+`tencent/Hunyuan3D-2.1` (shape DiT + texture paint).
 
 ### Submit a job
 
@@ -94,6 +94,22 @@ curl -sL http://localhost:8080/v1/jobs/<job_id>/result -o out.glb
 - Job metadata + GLB are persisted under `outputs/` (configurable) and survive restarts.
 - v2.0 (`hy3dgen` package) is auto-detected as a fallback if the 2.1 bindings
   aren't installed; the same API and offloading strategy apply.
+
+## Google Colab (T4)
+
+One-click Colab setup defaults to shape-only (~10 GB peak, fits 14.6 GB T4).
+Texture is off by default (paint model needs 21 GB, doesn't fit T4).
+
+```python
+# Run inside a Colab cell (OR clone + run the scripts)
+!git clone https://github.com/you/hunyuan3d-api /content/hunyuan3d-api
+!bash /content/hunyuan3d-api/scripts/colab_setup.sh
+!bash /content/hunyuan3d-api/scripts/colab_run.sh &
+!sleep 3 && python /content/hunyuan3d-api/scripts/colab_test.py
+```
+
+The test script spins up the server (if down), hits `/health`, posts a test
+image, polls the job to completion, and validates the GLB with trimesh.
 
 ## Docker
 

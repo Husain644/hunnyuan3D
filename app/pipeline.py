@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib
 import io
 import logging
+import os
 import sys
 import threading
 import traceback
@@ -48,25 +49,47 @@ class Hunyuan3DError(RuntimeError):
 # --------------------------------------------------------------------------
 # Version / package detection
 # --------------------------------------------------------------------------
-def _repo_dirs() -> list[Path]:
-    """Locate hy3dshape/ + hy3dpaint/ (v2.1 repo).
+# The official Hunyuan3D-2.1 repo holds `hy3dshape/` and `hy3dpaint/` as
+# sibling folders. `hy3dshape` is a package with an inner `hy3dshape/`
+# directory; the repo README imports it by pushing the folders onto
+# sys.path (NOT the repo root):
+#
+#     sys.path.insert(0, '.../hy3dshape')
+#     sys.path.insert(0, '.../hy3dpaint')
+#     from hy3dshape.pipelines          import Hunyuan3DDiTFlowMatchingPipeline
+#     from hy3dshape.rembg              import BackgroundRemover
+#     from textureGenPipeline           import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
+#
+# We replicate exactly that layout so the vendor code works untouched.
 
-    Searches the working directory, the service parent, and every import
-    path (PYTHONPATH / venv site-packages) for a directory that contains
-    both sibling packages.
+
+def _repo_dirs() -> list[Path]:
+    """Locate the Hunyuan3D-2.1 repo root (a folder with hy3dshape/ + hy3dpaint/).
+
+    Searches the working directory, the service parent, every import path
+    (PYTHONPATH / Colab /content), and the HY3D_REPO_DIR env override.
     """
     hints: list[Path] = []
+    if os.getenv("HY3D_REPO_DIR"):
+        hints.append(Path(os.environ["HY3D_REPO_DIR"]))
     hints.append(Path.cwd())
     env = sys.modules.get(__name__).__package__ or ""
     if env:
         hints.append(Path(__file__).resolve().parents[3])
+    # Google Colab lineage
+    for cand in ("/content/Hunyuan3D-2.1", "/content/hunyuan3d-api/Hunyuan3D-2.1",
+                 "/content/gdrive/MyDrive/Hunyuan3D-2.1"):
+        hints.append(Path(cand))
     for p in list(sys.path):
         if p and Path(p).exists():
             hints.append(Path(p))
     out: list[Path] = []
     seen: set[Path] = set()
     for root in hints:
-        root = root.resolve()
+        try:
+            root = root.resolve()
+        except OSError:
+            continue
         if root in seen:
             continue
         seen.add(root)
@@ -79,58 +102,75 @@ def _repo_dirs() -> list[Path]:
 
 @dataclass
 class _Backend:
+    """Resolved shape backend. Paint is imported lazily inside the texture
+    stage so shape-only deployments never touch hy3dpaint (which requires
+    the compiled custom_rasterizer)."""
+
     version: str = "2.1"
-    sys_path_root: Optional[Path] = None
+    root: Optional[Path] = None
     shape_cls: Any = None
-    paint_cls: Any = None
-    texgen_cfg: Any = None
+
+    @property
+    def shape_dir(self) -> Optional[Path]:
+        return None if self.root is None else self.root / "hy3dshape"
+
+    @property
+    def paint_dir(self) -> Optional[Path]:
+        return None if self.root is None else self.root / "hy3dpaint"
 
 
 BACKEND = _Backend()
 
 
+def _try_import_hy3dshape(root: Path) -> Optional[Any]:
+    """Import the 2.1 shape pipeline using the vendor's sys.path recipe."""
+    shape_dir = root / "hy3dshape"
+    paint_dir = root / "hy3dpaint"
+    for d in (shape_dir, paint_dir):
+        if str(d) not in sys.path:
+            sys.path.insert(0, str(d))
+    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
+
+    return Hunyuan3DDiTFlowMatchingPipeline
+
+
 def _init_backend() -> _Backend:
-    """Resolve and import the Hunyuan3D python bindings (2.1 first, 2.0 fallback)."""
+    """Resolve and import the Hunyuan3D python bindings (2.1 first, 2.0 fallback).
+
+    Only the *shape* classes are imported eagerly; paint classes are imported
+    lazily by :meth:`Hunyuan3DPipeline._build_paint`, so a shape-only install
+    (texture disabled) does not need hy3dpaint's compiled rasterizer.
+    """
     if BACKEND.shape_cls is not None:
         return BACKEND
 
     roots = _repo_dirs()
     for root in roots:
-        sys.path.insert(0, str(root))
         try:
-            from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
-            from hy3dpaint.textureGenPipeline import (  # noqa: E402
-                Hunyuan3DPaintPipeline,
-                Hunyuan3DPaintConfig,
-            )
-
+            cls = _try_import_hy3dshape(root)
             BACKEND.version = "2.1"
-            BACKEND.sys_path_root = root
-            BACKEND.shape_cls = Hunyuan3DDiTFlowMatchingPipeline
-            BACKEND.paint_cls = Hunyuan3DPaintPipeline
-            BACKEND.texgen_cfg = Hunyuan3DPaintConfig
-            logger.info("Using Hunyuan3D v2.1 bindings from %s", root)
+            BACKEND.root = root
+            BACKEND.shape_cls = cls
+            logger.info("Using Hunyuan3D v2.1 shape bindings from %s", root)
             return BACKEND
         except Exception as exc:  # noqa: BLE001
-            logger.debug("v2.1 import failed (%s); trying v2.0", exc)
-            sys.path = [p for p in sys.path if str(root) not in str(p)]
+            logger.debug("v2.1 shape import failed from %s (%s)", root, exc)
 
     # v2.0 fallback (hy3dgen monolithic package)
     try:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
-        from hy3dgen.texgen import Hunyuan3DPaintPipeline, Hunyuan3DTexGenConfig  # noqa: E402
 
         BACKEND.version = "2.0"
+        BACKEND.root = None
         BACKEND.shape_cls = Hunyuan3DDiTFlowMatchingPipeline
-        BACKEND.paint_cls = Hunyuan3DPaintPipeline
-        BACKEND.texgen_cfg = Hunyuan3DTexGenConfig
-        logger.info("Using Hunyuan3D v2.0 (hy3dgen) bindings")
+        logger.info("Using Hunyuan3D v2.0 (hy3dgen) shape bindings")
         return BACKEND
     except Exception as exc:  # noqa: BLE001
         raise Hunyuan3DError(
-            "Neither Hunyuan3D-2.1 (hy3dshape/hy3dpaint) nor v2.0 (hy3dgen) "
-            "bindings are importable. Clone Tencent-Hunyuan/Hunyuan3D-2.1 next "
-            "to this service and build hy3dpaint/custom_rasterizer.\n"
+            "Neither Hunyuan3D-2.1 (hy3dshape) nor v2.0 (hy3dgen) shape "
+            "bindings are importable. Run scripts/colab_setup.sh or clone "
+            "Tencent-Hunyuan/Hunyuan3D-2.1 so the hy3dshape/ + hy3dpaint/ "
+            "folders are discoverable (HY3D_REPO_DIR).\n"
             + "".join(traceback.format_exception_only(type(exc), exc))
         ) from exc
 
@@ -200,9 +240,10 @@ class Hunyuan3DPipeline:
     def _build_rembg(self) -> Any:
         if self._rembg is not None:
             return self._rembg
-        # Candidate locations across v2.0 (hy3dgen) and v2.1 (hy3dshape) repos.
-        for mod_path in ("hy3dgen.rembg", "hy3dshape.rembg", "hy3dshape.rembg_util",
-                         "hy3dshape.removeBackground"):
+        # Candidate locations: v2.1 repo ships hy3dshape/rembg.py; v2.0 has
+        # hy3dgen.rembg; the standalone `rembg` pip library is the last resort.
+        for mod_path in ("hy3dshape.rembg", "hy3dgen.rembg",
+                         "hy3dshape.rembg_util", "hy3dshape.removeBackground"):
             try:
                 mod = importlib.import_module(mod_path)
                 remover_cls = getattr(mod, "BackgroundRemover", None)
@@ -218,31 +259,75 @@ class Hunyuan3DPipeline:
                 return self._rembg
             except Exception:  # noqa: BLE001
                 continue
+        try:
+            import rembg  # type: ignore
+
+            from .pipeline_adapter import _RembgLibAdapter as _Adapter  # noqa: F401
+        except Exception:
+            _Adapter = None
+        if _Adapter is not None:
+            self._rembg = _Adapter._build(rembg)  # type: ignore[attr-defined]
+            return self._rembg
         raise Hunyuan3DError(
             "Background removal requested but no BackgroundRemover found; "
-            "set HY3D_ENABLE_REMBG=0 or install rembg + a Hunyuan3D binding."
+            "set HY3D_ENABLE_REMBG=0 or install rembg."
         )
 
     def _build_shape(self) -> Any:
         if self._shape is not None:
             return self._shape
-        logger.info("Loading shape pipeline %s ...", self.s.shape_model)
+        logger.info("Loading shape pipeline %s (subfolder=%s) ...",
+                    self.s.shape_model, self.s.shape_subfolder)
+        kwargs = {}
+        if self.s.shape_subfolder:
+            kwargs["subfolder"] = self.s.shape_subfolder
         self._shape = self.backend.shape_cls.from_pretrained(
-            self.s.shape_model,
-            cache_dir=str(self.s.cache_dir),
+            self.s.shape_model, **kwargs
         )
         return self._shape
 
     def _build_paint(self) -> Any:
+        """Lazily import the texture pipeline.
+
+        v2.1: hy3dpaint/textureGenPipeline.py binds to the compiled custom
+        rasterizer at import time, so it is only imported when a texture job
+        actually runs. v2.0: hy3dgen.texgen.
+        """
         if self._paint is not None:
             return self._paint
-        cfg_cls = self.backend.texgen_cfg
-        cfg = cfg_cls(
-            max_num_view=self.s.tex_num_views,
-            resolution=self.s.tex_resolution,
-        )
-        logger.info("Loading paint pipeline (tex res=%s) ...", self.s.tex_resolution)
-        self._paint = self.backend.paint_cls(cfg)
+        if self.backend.version == "2.1":
+            root = self.backend.root
+            paint_dir = root / "hy3dpaint" if root is not None else None
+            if paint_dir is None or not paint_dir.is_dir():
+                raise Hunyuan3DError(
+                    "Texture stage requires the hy3dpaint/ folder from the "
+                    "Hunyuan3D-2.1 repo."
+                )
+            if str(paint_dir) not in sys.path:
+                sys.path.insert(0, str(paint_dir))
+            from textureGenPipeline import (  # noqa: E402
+                Hunyuan3DPaintConfig,
+                Hunyuan3DPaintPipeline,
+            )
+
+            cfg = Hunyuan3DPaintConfig(
+                max_num_view=self.s.tex_num_views,
+                resolution=self.s.tex_resolution,
+            )
+            logger.info("Loading paint pipeline (tex res=%s) ...", self.s.tex_resolution)
+            self._paint = Hunyuan3DPaintPipeline(cfg)
+        else:
+            from hy3dgen.texgen import (  # noqa: E402
+                Hunyuan3DPaintPipeline,
+                Hunyuan3DTexGenConfig,
+            )
+
+            cfg = Hunyuan3DTexGenConfig(
+                max_num_view=self.s.tex_num_views,
+                resolution=self.s.tex_resolution,
+            )
+            logger.info("Loading paint pipeline (tex res=%s) ...", self.s.tex_resolution)
+            self._paint = Hunyuan3DPaintPipeline(cfg)
         return self._paint
 
     # -- lifecycle ----------------------------------------------------------

@@ -21,6 +21,28 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _on_colab() -> bool:
+    """Detect a Google Colab runtime.
+
+    Checks the well-known env vars / paths, PLUS the authoritative test:
+    importing `google.colab` (which only exists in a Colab kernel).
+    """
+    if os.environ.get("COLAB_GPU") or os.environ.get("COLAB_TPU_ADDR"):
+        return True
+    if Path("/content").is_dir() and not os.environ.get("JUPYTERHUB_BASE_URL"):
+        return True
+    try:
+        # flake8: noqa
+        import google.colab  # type: ignore # noqa: F401
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+IS_COLAB = _on_colab()
+
+
 # Hard ceiling for the T4 16 GB card (14.6 GB usable after reserved).
 # Stage-level budgets are kept lower so that the *second* half of the
 # pipeline (texture) can still fit after the first half is offloaded.
@@ -42,10 +64,16 @@ def _bank_setup() -> dict[str, float]:
 
 
 def _model_setup() -> dict[str, str]:
-    """HuggingFace sibling of the shape model supplies the texture weights."""
+    """HuggingFace repo and shape subfolder for the v2.1 weights.
+
+    The official `tencent/Hunyuan3D-2.1` repo bundles shape (DiT+VAE) and
+    texture (paint) under the *same* HF repo; the shape checkpoint lives in
+    the `hunyuan3d-dit-v2-1` subfolder.
+    """
     return {
         "repo": _env("HY3D_MODEL_REPO", "tencent/Hunyuan3D-2.1"),
-        "shape": _env("HY3D_SHAPE_MODEL", "tencent/Hunyuan3D-Shape-v2-1"),
+        "shape": _env("HY3D_SHAPE_MODEL", "tencent/Hunyuan3D-2.1"),
+        "shape_subfolder": _env("HY3D_SHAPE_SUBFOLDER", "hunyuan3d-dit-v2-1"),
         # v2.1 ships texture under the shape checkpoint's Paint config
         "paint": _env("HY3D_PAINT_MODEL", "tencent/Hunyuan3D-2.1"),
         "dev_id": _env("HY3D_CPU_DEVICE", "CPU"),
@@ -65,9 +93,13 @@ class Settings:
     log_level: str = _env("HY3D_LOG_LEVEL", "info")
 
     # Whether to actually load the Paint/texture stage. Texture is what
-    # pushes v2.1 past a 14.6 GB T4, so it defaults ON with offloading.
-    enable_texture: bool = _env("HY3D_ENABLE_TEXTURE", "1").lower() not in {"0", "false", "no"}
-    enable_rembg: bool = _env("HY3D_ENABLE_REMBG", "1").lower() not in {"0", "false", "no"}
+    # pushes v2.1 past a 14.6 GB T4, so it defaults OFF on Colab T4 runtimes
+    # (explicit HY3D_ENABLE_TEXTURE still wins).
+    _tex_default = "0" if IS_COLAB else "1"
+    enable_texture: bool = _env("HY3D_ENABLE_TEXTURE", _tex_default).lower() not in {"0", "false", "no"}
+    # Background removal defaults off on Colab (extra model + onnx runtime).
+    _rembg_default = "0" if IS_COLAB else "1"
+    enable_rembg: bool = _env("HY3D_ENABLE_REMBG", _rembg_default).lower() not in {"0", "false", "no"}
 
     # Diffusion / mesh extraction knobs (see hy3dshape.pipelines)
     num_inference_steps: int = int(_env("HY3D_STEPS", "30"))
@@ -93,6 +125,7 @@ class Settings:
     # Model weights
     model_repo: str = _model_setup()["repo"]
     shape_model: str = _model_setup()["shape"]
+    shape_subfolder: str = _model_setup()["shape_subfolder"]
     paint_model: str = _model_setup()["paint"]
     cpu_device: str = _model_setup()["dev_id"]
 
