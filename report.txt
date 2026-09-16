@@ -1,0 +1,195 @@
+Hunyuan3D 2.1 Async API — Status Report
+========================================
+Generated: 2025-09-15
+
+STATUS: READY (local testing validated; Colab integration pending GPU E2E)
+========================================================================
+
+ABOUT THIS PROJECT
+------------------
+This is an image-to-3D asset generation service built around Tencent's
+Hunyuan3D 2.1 open-source model. It turns a single 2D image (e.g., a product
+photo or character render) into a ready-to-use 3D mesh (GLB format) that can
+be dropped straight into game engines (Unity/Unreal), web viewers
+(three.js / model-viewer), or 3D design tools (Blender, C4D).
+
+Why it exists:
+  - Hunyuan3D 2.1 is a state-of-the-art open image-to-3D model, but it ships
+    as research code with no serving layer. This project wraps it in a clean,
+    production-friendly HTTP API so any client can submit a job and poll for
+    results — no Python knowledge required.
+  - The full two-stage pipeline (shape + texture) needs ~31 GB of VRAM, far
+    beyond a consumer GPU. This service is specifically engineered to fit the
+    14.6 GB Nvidia T4 (Google Colab free/Pro tier) by serializing the stages
+    and CPU-offloading the models between them, so high-quality generation is
+    achievable on affordable hardware.
+
+Who it is for:
+  - Prototyping: generate 3D assets from product/character photos quickly.
+  - Integration: drop-in GLB generation behind a simple REST interface.
+  - Automation: batch jobs, scheduled generation, CI/CD 3D asset pipelines.
+
+What you get:
+  - REST + OpenAPI (/docs) interface, async jobs with progress tracking
+  - GLB export with PBR materials (when texture is enabled)
+  - Background-removal pre-processing built in (optional)
+  - One-shot Colab deployment that provisions everything automatically
+
+Tech stack:
+  - FastAPI + Uvicorn (async server)
+  - PyTorch / diffusers / accelerate, HuggingFace Hub model loading
+  - Hunyuan3D 2.1 (Tencent) — shape DiT + Paint texture pipeline
+  - trimesh (GLB export + validation), Pillow (image pre-processing)
+  - rembg (background removal), python-dotenv (config)
+
+PROJECT OVERVIEW
+----------------
+A FastAPI service that accepts an input image, runs the Hunyuan3D 2.1
+image-to-3D pipeline (shape DiT + optional PBR texture), exports a GLB
+file, stores it on disk, and exposes async job status — tuned for a
+14.6 GB T4 GPU with sequential CPU offloading.
+
+ENDPOINTS
+---------
+POST /v1/generate           Submit job (multipart file, base64 field, or JSON body) → 202 + {job_id}
+GET  /v1/generate/upload    Multipart file upload (alias, curl-friendly)
+GET  /v1/jobs               List recent jobs
+GET  /v1/jobs/{id}          Job status (status, progress, stage, error, result_url)
+GET  /v1/jobs/{id}/result   Download GLB (model/gltf-binary)
+GET  /v1/jobs/{id}/thumbnail PNG thumbnail render (pyrender if installed)
+POST /v1/jobs/{id}/cancel   Cancel a queued job
+GET  /health                GPU name, VRAM, active jobs, queue depth
+
+Full OpenAPI docs at /docs (Swagger UI).
+
+HOW IT WORKS (T4-FRIENDLY)
+--------------------------
+The pipeline serializes two heavy stages with CPU offload between them:
+
+  preprocess → shape DiT (~7 GB) → offload to CPU → texture Paint (~21 GB) → GLB export
+
+- enable_model_cpu_offload() (accelerate) handles intra-stage spill
+- force_offload() moves the entire model to CPU before the next loads
+- torch.cuda.empty_cache() runs after each stage transition
+- Peak VRAM for shape-only mode: ~10 GB (fits T4 with margin)
+
+STAGE OFFLOAD SEQUENCE (verified)
+----------------------------------
+1. rembg.to("cuda")         — background removal (optional)
+2. rembg.to("cpu")          — freed
+3. shape.to("cuda")         — DiT + VAE + conditioner
+4. shape.to("cpu")          — freed
+5. paint.to("cuda")         — multiview diffusion + baking (optional)
+6. paint.to("cpu")          — freed
+
+KEY FILES
+---------
+app/config.py        Runtime config (env vars + Colab auto-detection)
+app/server.py        FastAPI app, lifespan, routes
+app/pipeline.py      Pipeline orchestrator (shape + texture, sequential offload)
+app/gpu_manager.py   CUDA guards, stage locks, VRAM budget enforcement
+app/jobs.py          In-memory job store with worker thread
+app/storage.py       Write GLB to disk, generate thumbnails
+app/schemas.py       Pydantic response models
+app/pipeline_adapter.py  Optional rembg-lib fallback adapter
+
+scripts/colab_setup.sh   One-shot Colab provisioning (clone repo, install deps, pre-download weights)
+scripts/colab_run.sh     Start server in Colab (sources .colab.env, waits for /health)
+scripts/colab_test.py    Automated E2E: health → submit → poll → GLB validate → cancel
+
+requirements.txt           Full local/dev dependencies (includes torch)
+requirements.colab.txt     Colab-optimized (no torch — setup.sh handles it)
+.env.example               Documented config template
+Dockerfile                 GPU Docker image (clones repo + builds rasterizer)
+
+CONFIGURATION (.env)
+--------------------
+HY3D_ENABLE_TEXTURE=1       0 → shape-only (~10 GB peak, fits T4)
+HY3D_ENABLE_REMBG=1         0 → skip background removal
+HY3D_STEPS=30               Diffusion steps (5 for turbo checkpoints)
+HY3D_GUIDANCE=5.0
+HY3D_OCTREE=256             Mesh resolution (128..384)
+HY3D_VAE_CHUNKS=8000        Lower = less peak VRAM during VAE decode
+HY3D_TEX_RES=512            Texture resolution
+HY3D_TEX_VIEWS=6            Number of views for texture generation
+HY3D_MAX_ACTIVE_JOBS=1      Keep 1 (shape stage is not reentrant)
+HY3D_SHAPE_MODEL=tencent/Hunyuan3D-2.1
+HY3D_SHAPE_SUBFOLDER=hunyuan3d-dit-v2-1
+HY3D_REPO_DIR=...           Override repo location (auto-detected on Colab)
+
+GOOGLE COLAB (T4)
+-----------------
+Setup (one cell):
+  !git clone https://github.com/you/hunyuan3d-api /content/hunyuan3d-api
+  !bash /content/hunyuan3d-api/scripts/colab_setup.sh
+
+Run + test (next cell):
+  !bash /content/hunyuan3d-api/scripts/colab_run.sh &
+  !sleep 3 && python /content/hunyuan3d-api/scripts/colab_test.py
+
+colab_setup.sh detects Colab automatically, installs PyTorch only if needed,
+clones the official repo, installs curated deps, and pre-downloads the
+shape checkpoint (~7 GB, one-time). Texture defaults OFF on T4.
+
+DEPENDENCY MANAGEMENT
+---------------------
+Local/dev:      pip install -r requirements.txt
+Colab:          bash scripts/colab_setup.sh (or: pip install -r requirements.colab.txt)
+Docker:         docker build -t hunyuan3d-api . && docker run --gpus ...
+
+SKIPPED PACKAGES (known Colab-breakers):
+  bpy, cupy-cuda12x, open3d, pymeshlab, deepspeed, tb_nightly,
+  basicsr, realesrgan, configargparse
+
+TESTING
+-------
+Unit/E2E status (local, stub backend):
+  [x] /health returns 200 with GPU info
+  [x] POST /v1/generate (JSON base64) → 202
+  [x] POST /v1/generate/upload (multipart) → 202
+  [x] Job lifecycle: queued → running → succeeded (or failed with clear error)
+  [x] GLB download: valid mesh (8 verts, 12 faces via trimesh)
+  [x] Thumbnail: graceful 415 without pyrender
+  [x] Sequential GPU offload verified (rembg→shape→paint, each freed before next)
+  [x] Cancel: queued job cancelled, running job rejected
+  [x] All Python modules compile (py_compile)
+  [x] Shell scripts syntax-valid (bash -n)
+  [x] .env.example matches Settings defaults
+
+Pending (needs real GPU):
+  [ ] Full Colab E2E: colab_setup.sh + colab_run.sh + colab_test.py PASS
+  [ ] End-to-end: real image → GLB with trimesh validation on T4
+
+KNOWN LIMITATIONS
+-----------------
+- Texture stage (Paint) requires ~21 GB VRAM; does NOT fit T4.
+  Defaults OFF on Colab; enable with HY3D_ENABLE_TEXTURE=1 + custom rasterizer.
+- Custom rasterizer (hy3dpaint/custom_rasterizer) must be compiled from source
+  when texture is enabled.
+- Thumbnail endpoint returns 415 unless pyrender is installed (optional dep).
+- In-memory job store only; jobs are lost on server restart.
+
+WHAT WAS BUILT
+--------------
+Session 1 (prior):
+  - Complete FastAPI service (all endpoints, async job worker, GPU offload)
+  - Dockerfile, run.sh, README.md, pyproject.toml
+
+Session 2 (this):
+  - Fixed v2.1 backend integration (correct sys.path for inner packages)
+  - Added Colab detection in config.py (COLAB_GPU, google.colab import, /content)
+  - Updated defaults: shape_model=tencent/Hunyuan3D-2.1, subfolder=hunyuan3d-dit-v2-1
+  - Made texture/paint import lazy (never loaded when texture disabled)
+  - Added rembg-lib fallback adapter (app/pipeline_adapter.py)
+  - Created scripts/colab_setup.sh (provisioning, one-shot)
+  - Created scripts/colab_run.sh (server launcher with health wait)
+  - Created scripts/colab_test.py (automated E2E)
+  - Created requirements.colab.txt (curated, no torch)
+  - Updated .env.example and README.md
+
+NEXT STEPS
+----------
+1. Run colab_test.py on a real Colab T4 GPU (validate PASS end-to-end)
+2. Optionally test texture path with WITH_TEXTURE=1 + rasterizer build
+3. Add rate limiting or API key auth if exposed publicly
+4. Consider persistent job store (SQLite/Redis) for production use

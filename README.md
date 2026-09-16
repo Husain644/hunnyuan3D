@@ -1,3 +1,6 @@
+# Session in  Opencode ->>> opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+
+
 # Hunyuan3D 2.1 Async API
 
 FastAPI service that takes an input image, runs Hunyuan3D 2.1's image-to-3D
