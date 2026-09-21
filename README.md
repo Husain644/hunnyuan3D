@@ -1,5 +1,88 @@
 # Session in  Opencode ->>> opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
 
+  █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+  ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+  Session   Async Python API for Hunyuan3D 2.1 GLB Export on …
+  Continue  opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+
+# How to convert an image to a 3D .glb model (quick start for next time)
+
+## Overview
+
+Image → 3D GLB conversion runs on a **Lightning.ai Tesla T4 CloudSpace** via an
+async FastAPI server. Input images and output GLBs are kept **in memory** — no
+disk persistence on the remote. Everything below is done from your local Windows
+machine.
+
+## Step 1 — Start opencode in this project
+
+```bash
+# from E:\AI (or anywhere)
+opencode
+# or resume this exact session if you need the history:
+opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+```
+
+## Step 2 — Make sure the remote server is running
+
+The CloudSpace sleeps when idle, so the server may be down. Restart it:
+
+```bash
+ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=15 \
+  s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
+  "cd ~/hunyuan3d-api && (nohup ./.venv/bin/python -m app.server > ./outputs/server.log 2>&1 &) && sleep 8 && curl -s http://127.0.0.1:8080/health | head -c 120"
+```
+
+Expected: `{"status":"ok","gpu_name":"Tesla T4",...}`. If the SSH key is rejected,
+just retry — the CloudSpace may have just restarted.
+
+## Step 3 — Upload an image and get the job id
+
+Plain `curl` from your machine against the public URL:
+
+```bash
+curl -X POST "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/generate/upload" \
+  -F "file=@E:\AI\image_for_glb\arm.jpg" -F "enable_texture=false"
+```
+
+Returns `{"job_id":"...","status":"queued",...}`. Note the `job_id`.
+
+## Step 4 — Poll until finished (~6–7 min for shape-only)
+
+```bash
+curl -s "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/jobs/<job_id>"
+```
+
+`"status":"succeeded","progress":1.0` means it's done. `failed` → check `error`.
+
+## Step 5 — Download the GLB to your local output folder
+
+```bash
+curl -o "E:\AI\glb-output\<name>.glb" \
+  "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/jobs/<job_id>/result"
+```
+
+The GLB is served once and then purged from the remote's RAM.
+
+## One-command version (steps 3–5)
+
+```bash
+ssh -o StrictHostKeyChecking=no s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
+  "scp 'E:\AI\image_for_glb\xx.jpg'"  # or upload via curl to localhost then pull the file
+```
+
+## Common gotchas
+
+- **Browser upload error "Unexpected non-whitespace character after JSON"** =
+  the server was down (CloudSpace slept). Restart it (Step 2) and retry.
+- Only **1 job at a time** (`HY3D_MAX_ACTIVE_JOBS=1`); extra uploads wait in the queue.
+- `enable_texture=false` = shape-only, ~10 GB, fits the 14.6 GB T4. Texture mode
+  needs 21 GB and is disabled on this CloudSpace.
+- Job GLBs live in RAM only — if the server restarts mid-job, the job is lost
+  and you must re-upload.
+
 
 # Hunyuan3D 2.1 Async API
 
