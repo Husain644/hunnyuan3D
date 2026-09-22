@@ -321,6 +321,18 @@ class Hunyuan3DPipeline:
                 max_num_view=self.s.tex_num_views,
                 resolution=self.s.tex_resolution,
             )
+            # The vendored pipeline reads several on-disk assets through
+            # path-like config attributes that are repo-root-relative in the
+            # official layout. Our vendor tree lives under vendor/... and the
+            # service keeps CWD at the repo root, so point them at absolute
+            # paths to survive any working directory and to avoid candidate
+            # views racing on os.chdir() between pool threads.
+            cfg.multiview_cfg_path = str(
+                root / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml"
+            )
+            cfg.realesrgan_ckpt_path = str(
+                Path(__file__).resolve().parents[1] / "ckpt" / "RealESRGAN_x4plus.pth"
+            )
             logger.info("Loading paint pipeline (tex res=%s) ...", self.s.tex_resolution)
             self._paint = Hunyuan3DPaintPipeline(cfg)
         else:
