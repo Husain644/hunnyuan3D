@@ -127,10 +127,9 @@ except Exception:  # noqa: BLE001
     logger.warning("MV pipeline not built (%s)", _MV_CLS)
     MV_PIPELINE = None
 
-for _i in range(_SLOTS):
-    _PIPELINE_POOL.append(PIPELINE)
-    if MV_PIPELINE is not None:
-        _MV_POOL.append(MV_PIPELINE)
+_PIPELINE_POOL.extend(Hunyuan3DPipeline(SETTINGS, GPU) for _i in range(_SLOTS))
+if MV_PIPELINE is not None:
+    _MV_POOL.extend(_MV_CLS(SETTINGS, GPU) for _i in range(_SLOTS))
 LOOP: Any = None
 
 SUPPORTED_MODELS = {"2.1", "2mv"}
