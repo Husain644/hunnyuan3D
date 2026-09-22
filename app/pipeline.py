@@ -389,6 +389,7 @@ class Hunyuan3DPipeline:
         tex_resolution: Optional[int] = None,
         return_bytes: bool = False,
         progress: Optional[callable] = None,  # fn(stage: str, pct: float)
+        metadata: Optional[dict] = None,      # -> GLB JSON "extras"
     ) -> PipelineResult:
         use_texture = self.s.enable_texture if enable_texture is None else enable_texture
         steps = num_inference_steps if num_inference_steps is not None else self.s.num_inference_steps
@@ -515,6 +516,14 @@ class Hunyuan3DPipeline:
         # ---- post-process + export ---------------------------------------
         report("export", 0.96)
         mesh = self._postprocess(mesh)
+        if metadata is not None:
+            try:
+                if hasattr(mesh, "metadata"):
+                    extras = dict(getattr(mesh, "metadata", {}).get("extras", {}) or {})
+                    extras.update(metadata)
+                    mesh.metadata["extras"] = extras
+            except Exception:  # noqa: BLE001
+                logger.debug("metadata attach failed", exc_info=True)
 
         job_suffix = _rand_suffix()
         out_path = self.s.output_dir / f"mesh_{job_suffix}.glb"

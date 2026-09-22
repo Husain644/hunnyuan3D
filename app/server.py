@@ -29,6 +29,12 @@ from .config import Settings
 from .gpu_manager import GpuManager, gpu_info, init_gpu_manager
 from .jobs import JobManager
 from .pipeline import Hunyuan3DPipeline, PipelineResult, _decode_base64
+try:  # optional: Hunyuan3D-2mv (multi-view) adapter
+    from .pipeline_mv import Hunyuan3DMVPipeline as _MV_CLS
+except Exception:  # noqa: BLE001
+    logger = __import__("logging").getLogger("hy3d.server")
+    logger.warning("2mv adapter not importable; multi-view model disabled")
+    _MV_CLS = None
 from .schemas import (
     ErrorOut,
     GenerateRequest,
@@ -88,7 +94,14 @@ _GPU_LOCK = asyncio.Lock()
 STORAGE = Storage(SETTINGS.output_dir, SETTINGS.job_dir)
 PUBLIC_STORAGE = MemoryStorage()
 PIPELINE = Hunyuan3DPipeline(SETTINGS, GPU)
+try:
+    MV_PIPELINE = _MV_CLS(SETTINGS, GPU) if _MV_CLS is not None else None
+except Exception:  # noqa: BLE001
+    logger.warning("MV pipeline not built (%s)", _MV_CLS)
+    MV_PIPELINE = None
 LOOP: Any = None
+
+SUPPORTED_MODELS = {"2.1", "2mv"}
 
 
 # --------------------------------------------------------------------------
@@ -150,15 +163,41 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
             job.set_status(JobStatus.RUNNING, stage=stage, progress=pct,
                            message=stage)
 
+    def _load_img(src):
+        if isinstance(src, str):
+            return _decode_base64(src)
+        img = Image.open(io.BytesIO(src))
+        img.load()
+        return img
+
+    meta = {}
+    if payload.get("name"):
+        meta["name"] = payload["name"]
+    if payload.get("description"):
+        meta["description"] = payload["description"]
+
     def work() -> PipelineResult:
-        image_src = payload["image"]
-        if isinstance(image_src, str):
-            img = _decode_base64(image_src)
-        elif isinstance(image_src, bytes):
-            img = Image.open(io.BytesIO(image_src))
-            img.load()
-        else:
-            raise ValueError("payload image must be base64 str or bytes")
+        model = payload.get("model", "2.1")
+        if model == "2mv":
+            if MV_PIPELINE is None:
+                raise RuntimeError("multi-view model not available on this host")
+            views = {}
+            for tag in ("front", "back", "left", "right"):
+                src = payload.get(f"view_{tag}")
+                if src:
+                    views[tag] = _load_img(src)
+            if not views:
+                raise ValueError("2mv requires at least one view image")
+            return MV_PIPELINE.run(
+                views,
+                num_inference_steps=payload.get("num_inference_steps"),
+                guidance_scale=payload.get("guidance_scale"),
+                octree_resolution=payload.get("octree_resolution"),
+                return_bytes=True,
+                metadata=meta or None,
+                progress=progress,
+            )
+        img = _load_img(payload["image"])
         return PIPELINE.run(
             img,
             enable_texture=payload.get("enable_texture", False),
@@ -167,6 +206,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
             octree_resolution=payload.get("octree_resolution"),
             tex_resolution=payload.get("tex_resolution"),
             return_bytes=True,
+            metadata=meta or None,
             progress=progress,
         )
 
@@ -204,14 +244,56 @@ async def index() -> FileResponse:
 
 @app.post("/v1/public/generate/upload", response_model=JobOut, status_code=202)
 async def public_generate_upload(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    model: str = Form("2.1"),
+    name: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    view_front: Optional[UploadFile] = File(None),
+    view_back: Optional[UploadFile] = File(None),
+    view_left: Optional[UploadFile] = File(None),
+    view_right: Optional[UploadFile] = File(None),
     enable_texture: Optional[bool] = Form(None),
     num_inference_steps: Optional[int] = Form(None),
     guidance_scale: Optional[float] = Form(None),
     octree_resolution: Optional[int] = Form(None),
     tex_resolution: Optional[int] = Form(None),
 ) -> JobOut:
-    data = await file.read()
+    model = model or "2.1"
+    if model not in SUPPORTED_MODELS:
+        raise HTTPException(status_code=400, detail=f"unknown model '{model}'")
+    if model == "2mv" and MV_PIPELINE is None:
+        raise HTTPException(status_code=503,
+                            detail="multi-view model not available on this host")
+    if model == "2mv":
+        views = {
+            "front": view_front,
+            "back": view_back,
+            "left": view_left,
+            "right": view_right,
+        }
+        if all(v is None for v in views.values()):
+            raise HTTPException(status_code=400,
+                                detail="2mv requires at least one view image")
+        payload: dict[str, Any] = {
+            "model": model,
+            "name": (name or "").strip() or None,
+            "description": (description or "").strip() or None,
+            **{
+                f"view_{tag}": (await v.read()) if v is not None else None
+                for tag, v in views.items()
+            },
+        }
+    else:
+        if file is None:
+            raise HTTPException(status_code=400,
+                                detail="'file' image is required for model 2.1")
+        data = await file.read()
+        payload = {
+            "model": model,
+            "image": data,
+            "name": (name or "").strip() or None,
+            "description": (description or "").strip() or None,
+        }
     opts: dict[str, Any] = {
         "enable_texture": enable_texture if enable_texture is not None else False,
         "num_inference_steps": num_inference_steps,
@@ -220,7 +302,7 @@ async def public_generate_upload(
         "tex_resolution": tex_resolution,
     }
     job_id = str(uuid.uuid4())
-    PUBLIC_JOBS.submit(job_id, {"image": data, **opts})
+    PUBLIC_JOBS.submit(job_id, {**payload, **opts})
     job = PUBLIC_JOBS.get(job_id)
     assert job is not None
     return JobOut(**job.snapshot())
@@ -246,11 +328,23 @@ async def public_job_result(job_id: str) -> Response:
     if data is None:
         raise HTTPException(status_code=404, detail="result file missing")
     PUBLIC_JOBS.forget(job_id)  # serve once, then purge from RAM
+    fname = _download_name(job)
     return Response(
         content=data,
         media_type="model/gltf-binary",
-        headers={"Content-Disposition": f'attachment; filename="{job_id}.glb"'},
+        headers={"Content-Disposition": f'attachment; filename="{fname}.glb"'},
     )
+
+
+def _download_name(job: Any) -> str:
+    """Sanitise the user-supplied object name down to a safe filename token."""
+    try:
+        raw = (job.payload.get("name") or "").strip()
+    except Exception:  # noqa: BLE001
+        return "object"
+    safe = "".join(c for c in raw if (c.isalnum() or c in "-_ ")).strip()
+    safe = " ".join(safe.split())[:60] or "object"
+    return f"{safe}_{job.job_id[:8]}"
 
 
 @app.get("/health", response_model=HealthOut)

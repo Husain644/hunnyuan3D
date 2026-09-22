@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Hunyuan3D 2.1 — Image to GLB</title>
+<title>Hunyuan3D 2.1 / 2mv — Image to GLB</title>
 <style>
   :root{
     --bg:#0b0e14; --panel:#141926; --panel2:#1a2130; --line:#2a3446;
@@ -41,6 +41,11 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
   .card h2{margin:0 0 14px;font-size:15px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
 
+  .seg{display:inline-flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px;margin-bottom:14px}
+  .seg button{border:none;background:transparent;color:var(--muted);padding:8px 16px;border-radius:8px;
+    font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+  .seg button.on{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+
   #drop{border:2px dashed var(--line);border-radius:12px;padding:30px 18px;text-align:center;
     cursor:pointer;transition:.15s;background:var(--panel2)}
   #drop.drag{border-color:var(--accent);background:#1d2840}
@@ -48,6 +53,31 @@
   #drop .main{font-weight:600}
   #drop .sub{color:var(--muted);font-size:13px;margin-top:4px}
   #fileInput{display:none}
+
+  .v4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  @media(max-width:520px){.v4{grid-template-columns:repeat(2,1fr)}}
+  .vslot{border:2px dashed var(--line);border-radius:12px;padding:14px 8px;text-align:center;
+    cursor:pointer;transition:.15s;background:var(--panel2);min-height:120px;position:relative;overflow:hidden}
+  .vslot.drag{border-color:var(--accent)}
+  .vslot.ok{border-style:solid;border-color:var(--ok)}
+  .vslot .vtag{font-size:11px;font-weight:700;letter-spacing:.5px;color:var(--muted)}
+  .vslot .vreq{color:var(--warn);font-weight:700}
+  .vslot img{width:100%;height:80px;object-fit:cover;border-radius:8px;margin-top:6px;border:1px solid var(--line)}
+  .vslot .vclr{position:absolute;top:5px;right:5px;background:#000c;color:#fff;border:none;border-radius:6px;
+    font-size:11px;padding:2px 7px;cursor:pointer;display:none}
+  .vslot.ok .vclr{display:block}
+  .vs-hide{display:none}
+
+  .fname{margin-top:16px;display:none;flex-direction:column;gap:10px}
+  .fname.show{display:flex}
+  .fname label{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+  .fname input,.fname textarea{background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    color:var(--text);padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical}
+  .fname .sub{font-size:11px;color:var(--muted)}
+  .addBtn{margin-top:14px;width:100%;padding:12px;font-size:14px;font-weight:700;color:#fff;
+    border:none;border-radius:10px;cursor:pointer;
+    background:linear-gradient(135deg,#2f9c6b,var(--accent2))}
+  .addBtn:disabled{opacity:.45;cursor:not-allowed}
 
   #queueBox{display:none;margin-top:14px}
   .qitem{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);
@@ -103,19 +133,48 @@
   </div>
 
   <header>
-    <h1>Hunyuan3D 2.1 <span class="badge">Batch</span></h1>
-    <p>Upload one or more images — each is converted to a downloadable 3D model (GLB), processed one by one.</p>
+    <h1>Hunyuan3D <span class="badge" id="modelBadge">2.1 · Batch</span></h1>
+    <p>Turn photos into a downloadable 3D model (GLB). Single images (2.1) or up to four views (2mv) — processed one job at a time.</p>
   </header>
 
   <div class="grid">
     <div class="card">
-      <h2>1 · Input images</h2>
+      <h2>1 · Model + Input</h2>
+      <div class="seg" id="seg">
+        <button data-m="2.1" class="on">2.1 · single view</button>
+        <button data-m="2mv">2mv · multi-view</button>
+      </div>
+
+      <!-- 2.1: multi-image dropzone -->
       <div id="drop">
         <div class="ph">🖼️</div>
-        <div class="main">Drop images here or click to browse</div>
-        <div class="sub">Multiple allowed · PNG / JPG / WEBP · one object per image</div>
+        <div class="main" id="dropMain">Drop images here or click to browse</div>
+        <div class="sub" id="dropSub">Multiple allowed · PNG / JPG / WEBP · one object per image</div>
         <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp" multiple/>
       </div>
+
+      <!-- 2mv: four view slots -->
+      <div class="v4 vs-hide" id="v4">
+        <div class="vslot" data-v="front"><span class="vtag">FRONT <span class="vreq">*</span></span><input type="file" class="vsinput" hidden accept="image/*"/></div>
+        <div class="vslot" data-v="back"><span class="vtag">BACK</span><input type="file" class="vsinput" hidden accept="image/*"/></div>
+        <div class="vslot" data-v="left"><span class="vtag">LEFT</span><input type="file" class="vsinput" hidden accept="image/*"/></div>
+        <div class="vslot" data-v="right"><span class="vtag">RIGHT</span><input type="file" class="vsinput" hidden accept="image/*"/></div>
+      </div>
+      <button class="addBtn vs-hide" id="addViewsBtn" disabled>+ Add these views to queue</button>
+
+      <!-- metadata (name / description) -->
+      <div class="fname" id="metaBox">
+        <div>
+          <label for="objName">Object name (optional)</label>
+          <input type="text" id="objName" placeholder="e.g. chess knight, mechanical part…" maxlength="80"/>
+        </div>
+        <div>
+          <label for="objDesc">Description (optional)</label>
+          <textarea id="objDesc" rows="2" placeholder="Shown in the downloaded GLB metadata…" maxlength="500"></textarea>
+        </div>
+        <div class="sub">Name &amp; description are embedded as GLB metadata (the model itself only conditions on images).</div>
+      </div>
+
       <div id="queueBox"></div>
       <button id="goBtn" disabled>Generate 3D models</button>
       <div class="queuemn" id="qmeta"></div>
@@ -137,14 +196,20 @@
         🔒 <b>Privacy:</b> images and generated models are processed in memory and are <b>not stored to disk</b>
         on the server. Each GLB is served once, then discarded.
       </div>
+      <div class="queuemn" style="margin-top:8px">
+        <b>Tip:</b> for <b>2mv</b>, add front / back / left / right photos of the same object
+        taken at the same height for the most accurate result. Front is required; the rest are optional.
+        <b>2.1</b> needs a single image — drag in several to queue a batch.
+      </div>
     </div>
   </div>
 
   <div class="note">
-    API: <code>POST /v1/public/generate/upload</code> (multipart <code>file</code>) →
+    API: <code>POST /v1/public/generate/upload</code> (multipart <code>file</code> for 2.1, or
+    <code>view_front/view_back/view_left/view_right</code> for 2mv, plus <code>model</code>, <code>name</code>, <code>description</code>) →
     <code>GET /v1/public/jobs/{id}</code> (status) →
     <code>GET /v1/public/jobs/{id}/result</code> (GLB bytes, then purged).
-    One job at a time — queued images start as the active job finishes (~4–7 min each).
+    One GPU job at a time — queued jobs start as the active one finishes (~2–7 min each).
   </div>
 </div>
 
@@ -152,8 +217,9 @@
 <script>
   const $ = id => document.getElementById(id);
   const drop=$('drop'), input=$('fileInput');
-  const queue = [];   // {file, status:'todo'|'wait'|'doing'|'ok'|'fail', jobId, progress, stage, el, blobUrl}
-  let current = null; // currently viewed item
+  let model = '2.1';
+  const queue = [];   // {type, file?, views?, name?, desc?, status, jobId, progress, stage, err, el, blobUrl, sizeMb}
+  let current = null;
   let generating = false;
 
   /* ---------- live log ---------- */
@@ -164,22 +230,39 @@
     $('logTxt').textContent = `[${t}] ${msg}`;
     $('logClock').textContent = t;
     const led=$('logLed');
-    if(kind==='ok'){led.className='pulse'}            /* green */
-    else if(kind==='wait'){led.className='pulse wait'}   /* amber */
-    else if(kind==='busy'){led.className='pulse busy'}   /* blue blink */
+    if(kind==='ok'){led.className='pulse'}
+    else if(kind==='wait'){led.className='pulse wait'}
+    else if(kind==='busy'){led.className='pulse busy'}
     else led.className='pulse';
   }
   $('logClear').addEventListener('click',()=>{ hist.length=0; $('logTxt').textContent='Log cleared.'; $('logClock').textContent=''; });
 
-  /* ---------- picker ---------- */
+  /* ---------- model selector ---------- */
+  const seg=$('seg');
+  seg.addEventListener('click',e=>{
+    const b=e.target.closest('button[data-m]'); if(!b) return;
+    model=b.dataset.m;
+    seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+    $('modelBadge').textContent = model==='2mv' ? '2mv · multi-view' : '2.1 · Batch';
+    const mv = model==='2mv';
+    $('drop').classList.toggle('vs-hide',mv);
+    $('v4').classList.toggle('vs-hide',!mv);
+    $('addViewsBtn').classList.toggle('vs-hide',!mv);
+    $('dropMain').textContent = mv?'':'Drop images here or click to browse';
+    $('dropSub').textContent = mv?'':'Multiple allowed · PNG / JPG / WEBP · one object per image';
+    log('Model set to '+(mv?'2mv (multi-view)':'2.1 (single-view)'),'wait');
+  });
+
+  /* ---------- 2.1 picker ---------- */
   function addFiles(list){
     const arr = Array.from(list);
     if(!arr.length) return;
     let added=0;
+    const name=$('objName').value.trim()||null, desc=$('objDesc').value.trim()||null;
     for(const f of arr){
       if(!f.type.startsWith('image/')){ log('skip non-image: '+f.name,'wait'); continue; }
       if(queue.length>=12){ log('queue full (max 12) — '+f.name+' ignored','wait'); break; }
-      queue.push({file:f, status:'todo', jobId:null, progress:0, stage:null, el:0});
+      queue.push({type:'2.1', file:f, name, desc, status:'todo', jobId:null, progress:0, stage:null, el:0});
       added++;
     }
     if(added) log(`+${added} image(s) queued (${queue.length} total)`,'wait');
@@ -191,9 +274,61 @@
   drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('drag');addFiles(e.dataTransfer.files)});
   input.addEventListener('change',()=>{addFiles(input.files); input.value='';});
 
+  /* ---------- 2mv view slots ---------- */
+  const vslots = $('v4').querySelectorAll('.vslot');
+  vslots.forEach(slot=>{
+    const vtag=slot.dataset.v;
+    const fileInput=slot.querySelector('.vsinput');
+    const show=()=>{
+      const f=slot._file;
+      slot.classList.toggle('ok',!!f);
+      let img=slot.querySelector('img');
+      if(f){ if(!img){img=document.createElement('img'); slot.appendChild(img);}
+        img.src=URL.createObjectURL(f);
+        const clr=document.createElement('button'); clr.className='vclr'; clr.textContent='✕';
+        clr.addEventListener('click',e=>{e.stopPropagation(); slot._file=null; slot.querySelector('input').value=''; show(); syncAddBtn();});
+        const old=slot.querySelector('.vclr'); if(old) old.remove();
+        slot.appendChild(clr);
+      } else { if(img) img.remove(); const old=slot.querySelector('.vclr'); if(old) old.remove(); }
+      syncAddBtn();
+    };
+    slot.addEventListener('click',()=>fileInput.click());
+    slot.addEventListener('dragover',e=>{e.preventDefault();slot.classList.add('drag')});
+    slot.addEventListener('dragleave',()=>slot.classList.remove('drag'));
+    slot.addEventListener('drop',e=>{e.preventDefault();slot.classList.remove('drag'); const f=e.dataTransfer.files[0]; if(f){slot._file=f; show();}});
+    fileInput.addEventListener('change',()=>{ if(fileInput.files[0]) slot._file=fileInput.files[0]; show(); });
+  });
+  function currentViews(){
+    const v={};
+    vslots.forEach(s=>{ if(s._file) v[s.dataset.v]=s._file; });
+    return v;
+  }
+  function syncAddBtn(){
+    const v=currentViews();
+    $('addViewsBtn').disabled = Object.keys(v).length===0;
+  }
+  $('addViewsBtn').addEventListener('click',()=>{
+    const v=currentViews();
+    if(!Object.keys(v).length){ showErr('Choose at least a front view.'); return; }
+    queue.push({type:'2mv', views:v, name:$('objName').value.trim()||null,
+      desc:$('objDesc').value.trim()||null, status:'todo', jobId:null, progress:0, stage:null, el:0});
+    vslots.forEach(s=>{ s._file=null; s.querySelector('input').value=''; showSlotReset(s); });
+    syncAddBtn();
+    log(`+1 multi-view job queued (${'front,back,left,right'.split(',').filter(t=>v[t]).join('/')}) · ${queue.length} total`,'wait');
+    renderQueue(); $('goBtn').disabled=false;
+    function showSlotReset(s){ s.classList.remove('ok'); const im=s.querySelector('img'),c=s.querySelector('.vclr'); if(im)im.remove(); if(c)c.remove(); }
+  });
+
+  /* ---------- queue render ---------- */
+  function thumbOf(q){ return q.file ? URL.createObjectURL(q.file) : URL.createObjectURL(q.views.front||Object.values(q.views)[0]); }
+  function labelOf(q){
+    if(q.name) return q.name;
+    if(q.file) return q.file.name;
+    return 'multi-view ('+Object.keys(q.views).join('/')+')';
+  }
   function renderQueue(){
     const box=$('queueBox');
-    if(!queue.length){ box.style.display='none'; return; }
+    if(!queue.length){ box.style.display='none'; $('qmeta').textContent=''; return; }
     box.style.display='block';
     let html='';
     queue.forEach((q,i)=>{
@@ -205,8 +340,8 @@
                 : 'lined up';
       const pct = q.status==='doing' ? Math.round((q.progress||0)*100) : (q.status==='ok'?100:0);
       html+=`<div class="qitem ${q===current?'sel':''}" data-i="${i}">
-        <img src="${URL.createObjectURL(q.file)}" alt=""/>
-        <div class="qi-name">${escapeHtml(q.file.name)}<small>${sub}${q.el? ' · '+q.el+'m':''}</small></div>
+        <img src="${thumbOf(q)}" alt=""/>
+        <div class="qi-name">${escapeHtml(labelOf(q))}<small>${sub}${q.el? ' · '+q.el+'m':''}</small></div>
         <div class="qi-state"><span class="chip ${cls}">${chip}</span>
           ${q.status==='doing'?`<div class="qbar"><i style="width:${pct}%"></i></div>`:''}
         </div>
@@ -239,10 +374,18 @@
   async function generateItem(item){
     const t0=Date.now();
     item.status='wait';
-    log('uploading '+item.file.name+' …','busy');
+    log('uploading '+labelOf(item)+' …','busy');
     let job;
     try{
-      const fd=new FormData(); fd.append('file',item.file); fd.append('enable_texture','false');
+      const fd=new FormData();
+      fd.append('model', item.type);
+      if(item.name) fd.append('name', item.name);
+      if(item.desc) fd.append('description', item.desc);
+      if(item.type==='2mv'){
+        for(const tag of ['front','back','left','right']) if(item.views[tag]) fd.append('view_'+tag, item.views[tag]);
+      } else {
+        fd.append('file', item.file); fd.append('enable_texture','false');
+      }
       const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
       let b; try{ b=await r.json(); }catch(_){
         const raw=await r.text().catch(()=>'');
@@ -250,10 +393,10 @@
       }
       if(!r.ok || b.error) throw new Error(b.error||b.detail||('HTTP '+r.status));
       job=b.job_id; item.jobId=job;
-      log(`uploaded ${item.file.name} → job ${job.slice(0,8)}`,'busy');
+      log(`uploaded ${labelOf(item)} → job ${job.slice(0,8)}`,'busy');
     }catch(e){
       item.status='fail'; item.err=e.message.slice(0,120);
-      log(`FAILED ${item.file.name}: ${e.message}`,'wait');
+      log(`FAILED ${labelOf(item)}: ${e.message}`,'wait');
       return;
     }
 
@@ -271,33 +414,31 @@
         s=j;
       }catch(e){
         item.status='fail'; item.err=e.message.slice(0,120);
-        log(`FAILED ${item.file.name}: ${e.message}`,'wait');
+        log(`FAILED ${labelOf(item)}: ${e.message}`,'wait');
         return;
       }
       const mins=((Date.now()-t0)/60000).toFixed(1);
       item.el=mins; item.progress=s.progress; item.stage=s.stage;
-      const line=`${item.file.name} · ${stageName(s.stage||'')} · ${Math.round((s.progress||0)*100)}% · ${mins}m`;
+      const line=`${labelOf(item)} · ${stageName(s.stage||'')} · ${Math.round((s.progress||0)*100)}% · ${mins}m`;
       if(s.status==='running'){ log(line,'busy'); }
       if(s.status==='succeeded'){
         item.status='doing'; item.progress=1; renderQueue(); item.status='ok';
-        log(`DONE ${item.file.name} · ${minextra(s)}`,'ok');
+        log(`DONE ${labelOf(item)}`,'ok');
         renderQueue();
         grabResult(item);
         return;
       }
       if(s.status==='failed'||s.status==='cancelled'){
         item.status='fail'; item.err=(s.error||s.status).slice(0,120);
-        log(`FAILED ${item.file.name}: ${item.err}`,'wait');
+        log(`FAILED ${labelOf(item)}: ${item.err}`,'wait');
         return;
       }
       renderQueue();
       await new Promise(r=>setTimeout(r,4000));
     }
-
-    function minextra(s){return `(${Math.round((s.progress||0)*100)}%)`;}
   }
 
-  /* ---------- result download (latest item that finished) ---------- */
+  /* ---------- result download ---------- */
   async function grabResult(item){
     if(!item||!item.jobId) return;
     try{
@@ -310,19 +451,18 @@
     }catch(e){ showErr('Download failed: '+e.message); }
   }
 
-  /* show a specific finished item in the main 3D viewer */
   function showItem(item){
     if(!item||!item.blobUrl) return;
     current=item;
     $('viewer').src=item.blobUrl;
     $('dlBtn').href=item.blobUrl;
-    $('dlBtn').download='hunyuan3d-'+(item.file.name.replace(/\.[^.]+$/,''))+'.glb';
+    const base=(item.name||item.file?.name||'hunyuan3d').replace(/\.[^.]+$/,'');
+    $('dlBtn').download=base+'.glb';
     $('result').style.display='block';
-    $('meshInfo').textContent=`${item.file.name} → ${item.sizeMb||'?'} MB GLB`;
+    $('meshInfo').textContent=`${labelOf(item)} → ${item.sizeMb||'?'} MB GLB`;
     renderQueue();
   }
 
-  /* click a ▶ to preview that image's 3D model */
   $('queueBox').addEventListener('click',e=>{
     const btn=e.target.closest('[data-view]');
     if(btn) showItem(queue[+btn.dataset.view]);
