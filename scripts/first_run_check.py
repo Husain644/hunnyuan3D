@@ -76,13 +76,17 @@ for mod in (
 print("3/4 Hunyuan source (hy3dshape)")
 repo_dir = None
 try:
-    from app.config import SETTINGS
     from app.pipeline import _repo_dirs  # noqa: F401
 
     dirs = _repo_dirs()
     repo_dir = str(Path(dirs[0]).resolve()) if dirs else None
 except Exception as exc:  # noqa: BLE001
-    fail(f"could not resolve vendor repo path: {exc}")
+    # _repo_dirs() can raise if config dir creation fails; fall back to env
+    import os
+
+    cand = os.environ.get("HY3D_REPO_DIR") or (SERVICE_ROOT / "vendor" / "Hunyuan3D-2.1")
+    repo_dir = str(cand) if cand else None
+    warn(f"could not resolve vendor repo path via app ({exc}); using env/fallback")
 if not repo_dir or not Path(repo_dir).exists():
     fail(f"vendor source not found at {repo_dir}. Clone it or re-run setup.sh.")
 shape_ok = (Path(repo_dir) / "hy3dshape").is_dir()
