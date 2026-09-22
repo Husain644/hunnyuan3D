@@ -70,6 +70,11 @@
     background:linear-gradient(135deg,var(--accent),var(--accent2))}
   #goBtn:disabled{opacity:.45;cursor:not-allowed}
 
+  .qitem.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .view{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:5px 10px;
+    font-size:11px;font-weight:700;cursor:pointer;flex:none}
+  .view:disabled{opacity:.35;cursor:default}
+
   #errBox{display:none;margin-top:14px;padding:12px;border:1px solid var(--err);border-radius:10px;
     background:#2a1518;color:var(--err);font-size:13px;white-space:pre-wrap}
 
@@ -147,7 +152,8 @@
 <script>
   const $ = id => document.getElementById(id);
   const drop=$('drop'), input=$('fileInput');
-  const queue = [];   // {file, status:'todo'|'wait'|'doing'|'ok'|'fail', jobId, progress, stage, el}
+  const queue = [];   // {file, status:'todo'|'wait'|'doing'|'ok'|'fail', jobId, progress, stage, el, blobUrl}
+  let current = null; // currently viewed item
   let generating = false;
 
   /* ---------- live log ---------- */
@@ -198,12 +204,13 @@
                 : q.status==='fail' ? (q.err||'error')
                 : 'lined up';
       const pct = q.status==='doing' ? Math.round((q.progress||0)*100) : (q.status==='ok'?100:0);
-      html+=`<div class="qitem">
+      html+=`<div class="qitem ${q===current?'sel':''}" data-i="${i}">
         <img src="${URL.createObjectURL(q.file)}" alt=""/>
         <div class="qi-name">${escapeHtml(q.file.name)}<small>${sub}${q.el? ' · '+q.el+'m':''}</small></div>
         <div class="qi-state"><span class="chip ${cls}">${chip}</span>
           ${q.status==='doing'?`<div class="qbar"><i style="width:${pct}%"></i></div>`:''}
         </div>
+        ${q.blobUrl?`<button class="view" data-view="${i}" title="Preview 3D">▶</button>`:''}
       </div>`;
     });
     box.innerHTML=html;
@@ -297,14 +304,29 @@
       const r=await fetch('/v1/public/jobs/'+item.jobId+'/result');
       if(!r.ok){ let b={}; try{b=await r.json()}catch(_){b={}} throw new Error(b.error||b.detail||('HTTP '+r.status)); }
       const blob=await r.blob();
-      const url=URL.createObjectURL(blob);
-      $('dlBtn').href=url; $('dlBtn').download='hunyuan3d-'+(item.file.name.replace(/\.[^.]+$/,''))+'.glb';
-      const v=$('viewer'); v.src=url;
-      $('result').style.display='block';
-      const mb=(blob.size/1048576).toFixed(2);
-      $('meshInfo').textContent=`${item.file.name} → ${mb} MB GLB · every result is saved above as it finishes`;
+      item.blobUrl=URL.createObjectURL(blob);
+      item.sizeMb=(blob.size/1048576).toFixed(2);
+      showItem(item);
     }catch(e){ showErr('Download failed: '+e.message); }
   }
+
+  /* show a specific finished item in the main 3D viewer */
+  function showItem(item){
+    if(!item||!item.blobUrl) return;
+    current=item;
+    $('viewer').src=item.blobUrl;
+    $('dlBtn').href=item.blobUrl;
+    $('dlBtn').download='hunyuan3d-'+(item.file.name.replace(/\.[^.]+$/,''))+'.glb';
+    $('result').style.display='block';
+    $('meshInfo').textContent=`${item.file.name} → ${item.sizeMb||'?'} MB GLB`;
+    renderQueue();
+  }
+
+  /* click a ▶ to preview that image's 3D model */
+  $('queueBox').addEventListener('click',e=>{
+    const btn=e.target.closest('[data-view]');
+    if(btn) showItem(queue[+btn.dataset.view]);
+  });
 
   function showErr(m){ $('errBox').textContent=m; $('errBox').style.display='block'; }
   function hideErr(){ $('errBox').style.display='none'; }
