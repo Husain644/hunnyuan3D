@@ -137,13 +137,19 @@ class GpuManager:
             torch.cuda.empty_cache()
         try:
             model.to(device)
+        except AttributeError as exc:
+            # Not a torch module (e.g. the vendored paint pipeline, which is a
+            # plain class owning internal models). Offload is best-effort, so a
+            # missing .to must never fail the job that already finished.
+            logger.info("%s has no .to(%s); skipping offload (%s)", type(model).__name__, device, exc)
+            return
         except Exception as exc:  # pragma: no cover
             logger.warning("Model .to(cpu) failed (%s); falling back to hooks", exc)
             offload = getattr(model, "enable_model_cpu_offload", None)
             if callable(offload):
-                offload()
-            else:
-                raise
+                return offload()
+            logger.warning("No offload hook either; leaving %s in place", type(model).__name__)
+            return
         if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()

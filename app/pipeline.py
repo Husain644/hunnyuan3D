@@ -497,24 +497,32 @@ class Hunyuan3DPipeline:
                 logger.warning("enable_model_cpu_offload on paint failed: %s", exc)
 
             try:
-                textured_mesh = paint_pipe(
-                    mesh,
-                    image_path=None,
-                    image=image,          # v2.1 convenience; harmless if unused
-                    max_num_view=self.s.tex_num_views,
-                    resolution=tex_res,
-                )
+                if self.backend.version == "2.1":
+                    # v2.1 paint pipeline is path-based:
+                    #   __call__(mesh_path, image_path, output_mesh_path,
+                    #            use_remesh=True, save_glb=True)
+                    # image_path accepts a PIL image directly; it returns the
+                    # path to the written textured .obj.
+                    import tempfile
+
+                    tex_dir = Path(tempfile.mkdtemp(prefix="tex3d_"))
+                    mesh_src = tex_dir / "shape_mesh.obj"
+                    mesh.export(str(mesh_src))
+                    out_obj = tex_dir / "textured_mesh.obj"
+                    written = paint_pipe(
+                        mesh_path=str(mesh_src),
+                        image_path=image,
+                        output_mesh_path=str(out_obj),
+                        use_remesh=True,
+                        save_glb=False,
+                    )
+                    textured_mesh = trimesh.load(str(written))
+                else:
+                    # v2.0 signature: paint_pipe(mesh, image='...')
+                    textured_mesh = paint_pipe(mesh, image=image)
                 report("texture", 0.95)
                 textured = True
                 self.stats["tex_runs"] += 1
-            except TypeError:
-                # v2.0 signature: paint_pipe(mesh, image='...')
-                try:
-                    textured_mesh = paint_pipe(mesh, image=image)
-                    textured = True
-                    self.stats["tex_runs"] += 1
-                except Exception as exc:  # noqa: BLE001
-                    raise Hunyuan3DError(f"Texture stage failed: {exc}") from exc
             except Exception as exc:  # noqa: BLE001
                 raise Hunyuan3DError(f"Texture stage failed: {exc}") from exc
             finally:
