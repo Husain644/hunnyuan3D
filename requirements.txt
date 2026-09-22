@@ -31,6 +31,8 @@ pyyaml
 scipy>=1.11
 scikit-image>=0.24        # skimage.measure in surface_extractors.py
 timm                      # timm.models.vision_transformer in moe_layers.py
+pymeshlab>=2025.7         # hy3dshape/postprocessors.py hard import at package init
+opencv-python-headless>=4.9  # cv2 in hy3dshape/preprocessors.py (import at init)
 tqdm
 
 # --- GLB export ---

@@ -39,8 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 tex = [
-  "opencv-python-headless>=4.9",
-  "pymeshlab>=2023.12",
+  "xatlas>=0.0.9",
+  "pygltflib>=1.16",
   "rembg>=2.0",
   "onnxruntime-gpu>=1.17",
 ]
