@@ -276,9 +276,15 @@ class Hunyuan3DPipeline:
     def _build_shape(self) -> Any:
         if self._shape is not None:
             return self._shape
-        logger.info("Loading shape pipeline %s (subfolder=%s) ...",
+        torch = _torch()
+        if torch is None or not torch.cuda.is_available():
+            raise Hunyuan3DError(
+                "Shape stage requires CUDA (v2.1 backend loads directly on GPU; "
+                "enable_model_cpu_offload crashes upstream)."
+            )
+        logger.info("Loading shape pipeline %s (subfolder=%s) on cuda fp16 ...",
                     self.s.shape_model, self.s.shape_subfolder)
-        kwargs = {}
+        kwargs = {"device": "cuda", "torch_dtype": torch.float16}
         if self.s.shape_subfolder:
             kwargs["subfolder"] = self.s.shape_subfolder
         self._shape = self.backend.shape_cls.from_pretrained(
@@ -410,14 +416,18 @@ class Hunyuan3DPipeline:
         # ---- Stage 1: shape ---------------------------------------------
         report("shape", 0.05)
         shape_pipe = self._load_stage("shape", self._build_shape)
-        try:
-            offload = getattr(shape_pipe, "enable_model_cpu_offload", None)
-            if callable(offload):
-                offload()
-                logger.debug("shape pipeline: model cpu offload enabled")
+        if self.backend.version != "2.1":
+            try:
+                offload = getattr(shape_pipe, "enable_model_cpu_offload", None)
+                if callable(offload):
+                    offload()
+                    logger.debug("shape pipeline: model cpu offload enabled")
+                self.gpu.mark_resident("shape", type(shape_pipe).__name__)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("enable_model_cpu_offload on shape failed: %s", exc)
+        else:
+            # v2.1 backend loads straight to cuda fp16; offload hooks crash it.
             self.gpu.mark_resident("shape", type(shape_pipe).__name__)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("enable_model_cpu_offload on shape failed: %s", exc)
 
         mesh = None
         try:
@@ -453,18 +463,21 @@ class Hunyuan3DPipeline:
             report("texture", 0.6)
             paint_pipe = self._load_stage("tex", self._build_paint)
             try:
-                offload = getattr(paint_pipe, "enable_model_cpu_offload", None)
-                if callable(offload):
-                    offload()
-                # Sub-models w/ independent pipelines (v2.1) may each offload.
-                for m in getattr(paint_pipe, "models", {}).values():
-                    sub = getattr(m, "pipeline", None)
-                    off = getattr(sub, "enable_model_cpu_offload", None)
-                    if callable(off):
-                        try:
-                            off()
-                        except Exception:  # noqa: BLE001
-                            pass
+                if self.backend.version == "2.1":
+                    self.gpu.mark_resident("tex", type(paint_pipe).__name__)
+                else:
+                    offload = getattr(paint_pipe, "enable_model_cpu_offload", None)
+                    if callable(offload):
+                        offload()
+                    # Sub-models w/ independent pipelines (v2.1) may each offload.
+                    for m in getattr(paint_pipe, "models", {}).values():
+                        sub = getattr(m, "pipeline", None)
+                        off = getattr(sub, "enable_model_cpu_offload", None)
+                        if callable(off):
+                            try:
+                                off()
+                            except Exception:  # noqa: BLE001
+                                pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("enable_model_cpu_offload on paint failed: %s", exc)
 

@@ -31,7 +31,7 @@ The CloudSpace sleeps when idle, so the server may be down. Restart it:
 
 ```bash
 ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=15 \
-  s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
+  ssh s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
   "cd ~/hunyuan3d-api && (nohup ./.venv/bin/python -m app.server > ./outputs/server.log 2>&1 &) && sleep 8 && curl -s http://127.0.0.1:8080/health | head -c 120"
 ```
 
