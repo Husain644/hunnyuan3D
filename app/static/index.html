@@ -99,6 +99,9 @@
     border:none;border-radius:10px;cursor:pointer;
     background:linear-gradient(135deg,var(--accent),var(--accent2))}
   #goBtn:disabled{opacity:.45;cursor:not-allowed}
+  .texopt{display:flex;align-items:center;gap:8px;margin:0 0 10px;font-size:13px;color:var(--txt);cursor:pointer;user-select:none}
+  .texopt input{width:16px;height:16px;accent-color:#7c5cff;cursor:pointer}
+  .texhint{color:var(--mut);font-size:11px}
 
   .qitem.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
   .view{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:5px 10px;
@@ -184,6 +187,9 @@
       </div>
 
       <div id="queueBox"></div>
+      <label class="texopt" title="Runs the texture/paint stage. Heavy: needs a single job slot and the compiled hy3dpaint rasterizer.">
+        <input type="checkbox" id="texToggle"/> Color texture <span class="texhint">(2.1 only · slow · needs big VRAM)</span>
+      </label>
       <button id="goBtn" disabled>Generate 3D models</button>
       <div class="queuemn" id="qmeta"></div>
       <div id="errBox"></div>
@@ -214,10 +220,10 @@
 
   <div class="note">
     API: <code>POST /v1/public/generate/upload</code> (multipart <code>file</code> for 2.1, or
-    <code>view_front/view_back/view_left/view_right</code> for 2mv, plus <code>model</code>, <code>name</code>, <code>description</code>) →
+    <code>view_front/view_back/view_left/view_right</code> for 2mv, plus <code>model</code>, <code>name</code>, <code>description</code>, <code>enable_texture</code>) →
     <code>GET /v1/public/jobs/{id}</code> (status) →
     <code>GET /v1/public/jobs/{id}/result</code> (GLB bytes, then purged).
-    One GPU job at a time — queued jobs start as the active one finishes (~2–7 min each).
+    The server auto-scales concurrency to free VRAM (current card: 2 shape slots; texture jobs run single-slot, ~3–8 min each).
   </div>
 </div>
 
@@ -425,7 +431,7 @@
     if(item.type==='2mv'){
       for(const tag of ['front','back','left','right']) if(item.views[tag]) fd.append('view_'+tag, item.views[tag]);
     } else {
-      fd.append('file', item.file); fd.append('enable_texture','false');
+      fd.append('file', item.file); fd.append('enable_texture', $('texToggle').checked ? 'true' : 'false');
     }
     const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
     let b; try{ b=await r.json(); }catch(_){
