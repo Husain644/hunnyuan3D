@@ -32,6 +32,25 @@ fi
 
 PORT="${HY3D_PORT:-8080}"
 
+# bpy's __init__.so links libembree4; if pymeshlab loads its bundled (older)
+# libembree4 first, bpy import fails with 'undefined symbol: rtc...
+#                            So put bpy's lib dir first in the loader path
+#                            so the correct Embree wins. No-op without bpy.
+BPY_LIB="$("$PY" - <<'PYEOF' 2>/dev/null || true
+import os, sys, site
+try:
+    import bpy
+except Exception:
+    sys.exit(0)
+import os.path as p
+d = os.path.join(site.getsitepackages()[0], "bpy", "lib")
+print(d if os.path.isdir(d) else "")
+PYEOF
+)"
+if [ -n "$BPY_LIB" ]; then
+  export LD_LIBRARY_PATH="$BPY_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 echo "== Hunyuan3D 2.1 / 2mv API =="
 echo "  texture:   ${HY3D_ENABLE_TEXTURE:-off}"
 echo "  rembg:     ${HY3D_ENABLE_REMBG:-off}"
