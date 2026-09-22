@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -85,3 +86,55 @@ class Storage:
         except OSError as exc:  # pragma: no cover
             logger.warning("thumb write failed: %s", exc)
             return None
+
+
+class MemoryStorage:
+    """RAM-only duck-type of Storage: no files are ever written to disk.
+
+    GLBs and metadata live in in-memory dicts; ``discard`` drops a job
+    entirely (used by the public pipeline so nothing persists on the host).
+    """
+
+    def __init__(self) -> None:
+        self._meta: dict[str, dict[str, Any]] = {}
+        self._glb: dict[str, bytes] = {}
+        self._thumbs: dict[str, bytes] = {}
+        self._lock = threading.Lock()
+
+    def save_meta(self, job_id: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._meta[job_id] = dict(data)
+
+    def load_meta(self, job_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            m = self._meta.get(job_id)
+            return dict(m) if m is not None else None
+
+    def store_glb(self, job_id: str, src: Path) -> Path:
+        # src is a path from pipeline export; keep the bytes copy in RAM.
+        with self._lock:
+            self._glb[job_id] = Path(src).read_bytes()
+        return Path("/") / "memory" / f"{job_id}.glb"
+
+    def store_glb_bytes(self, job_id: str, data: bytes) -> None:
+        with self._lock:
+            self._glb[job_id] = data
+
+    def read_glb(self, job_id: str) -> Optional[bytes]:
+        with self._lock:
+            return self._glb.get(job_id)
+
+    def glb_sha256(self, job_id: str) -> str:
+        data = self.read_glb(job_id) or b""
+        return hashlib.sha256(data).hexdigest()
+
+    def store_thumbnail(self, job_id: str, image_bytes: bytes) -> Optional[Path]:
+        with self._lock:
+            self._thumbs[job_id] = image_bytes
+            return Path("/") / "memory" / f"{job_id}.png"
+
+    def discard(self, job_id: str) -> None:
+        with self._lock:
+            self._meta.pop(job_id, None)
+            self._glb.pop(job_id, None)
+            self._thumbs.pop(job_id, None)

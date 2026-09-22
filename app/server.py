@@ -37,7 +37,7 @@ from .schemas import (
     JobOut,
     JobStatus,
 )
-from .storage import Storage
+from .storage import MemoryStorage, Storage
 import app.gpu_manager as gpu_module
 
 logger = logging.getLogger("hy3d.server")
@@ -46,13 +46,20 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+GO_APP_PATH = Path(__file__).resolve().parent / "static"
+_G_PUB_SWEEP_TTL = 3600.0
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Start the job worker; JOBS is a module global bound by import end."""
+    """Start the job workers and the public TTL sweeper."""
     global LOOP
     LOOP = asyncio.get_running_loop()
     JOBS.start(LOOP)
+    PUBLIC_JOBS.start(LOOP)
+    task = asyncio.create_task(_public_sweeper())
     yield
+    task.cancel()
 
 
 app = FastAPI(
@@ -74,7 +81,12 @@ SETTINGS = Settings()
 init_gpu_manager(SETTINGS.vram)
 GPU: GpuManager = gpu_module.gpu_manager
 
+# One in-process GPU lock: both the disk (JOBS) and RAM-only (PUBLIC_JOBS)
+# pipelines serialize their CUDA work through it, so jobs never overlap on GPU.
+_GPU_LOCK = asyncio.Lock()
+
 STORAGE = Storage(SETTINGS.output_dir, SETTINGS.job_dir)
+PUBLIC_STORAGE = MemoryStorage()
 PIPELINE = Hunyuan3DPipeline(SETTINGS, GPU)
 LOOP: Any = None
 
@@ -114,7 +126,8 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
 
     import asyncio
 
-    result: PipelineResult = await asyncio.to_thread(work)
+    async with _GPU_LOCK:
+        result: PipelineResult = await asyncio.to_thread(work)
     dst = STORAGE.store_glb(job_id, result.glb_path)
     return {
         "result_url": f"/v1/jobs/{job_id}/result",
@@ -123,6 +136,121 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
 
 
 JOBS = JobManager(STORAGE, _execute_job, max_active=SETTINGS.max_active_jobs)
+
+
+# --------------------------------------------------------------------------
+# public (RAM-only) pipeline: no disk writes, GLB purged after download
+# --------------------------------------------------------------------------
+async def _execute_job_public(job_id: str, payload: dict) -> dict:
+    from PIL import Image
+
+    def progress(stage: str, pct: float) -> None:
+        job = PUBLIC_JOBS.get(job_id)
+        if job is not None:
+            job.set_status(JobStatus.RUNNING, stage=stage, progress=pct,
+                           message=stage)
+
+    def work() -> PipelineResult:
+        image_src = payload["image"]
+        if isinstance(image_src, str):
+            img = _decode_base64(image_src)
+        elif isinstance(image_src, bytes):
+            img = Image.open(io.BytesIO(image_src))
+            img.load()
+        else:
+            raise ValueError("payload image must be base64 str or bytes")
+        return PIPELINE.run(
+            img,
+            enable_texture=payload.get("enable_texture", False),
+            num_inference_steps=payload.get("num_inference_steps"),
+            guidance_scale=payload.get("guidance_scale"),
+            octree_resolution=payload.get("octree_resolution"),
+            tex_resolution=payload.get("tex_resolution"),
+            return_bytes=True,
+            progress=progress,
+        )
+
+    async with _GPU_LOCK:
+        result: PipelineResult = await asyncio.to_thread(work)
+    if result.glb_bytes:
+        PUBLIC_STORAGE.store_glb_bytes(job_id, result.glb_bytes)
+    return {"result_url": f"/v1/public/jobs/{job_id}/result"}
+
+
+PUBLIC_JOBS = JobManager(PUBLIC_STORAGE, _execute_job_public,
+                         max_active=SETTINGS.max_active_jobs)
+
+
+async def _public_sweeper() -> None:
+    """Periodically drop finished public jobs so RAM stays bounded."""
+    import asyncio as _a
+
+    while True:
+        await _a.sleep(30)
+        try:
+            PUBLIC_JOBS.sweep_finished(_G_PUB_SWEEP_TTL)
+        except Exception:  # noqa: BLE001
+            logger.exception("public sweeper error")
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    p = GO_APP_PATH / "index.html"
+    if not p.exists():
+        return JSONResponse({"detail": "public page not bundled"},
+                            status_code=501)
+    return FileResponse(p)
+
+
+@app.post("/v1/public/generate/upload", response_model=JobOut, status_code=202)
+async def public_generate_upload(
+    file: UploadFile = File(...),
+    enable_texture: Optional[bool] = Form(None),
+    num_inference_steps: Optional[int] = Form(None),
+    guidance_scale: Optional[float] = Form(None),
+    octree_resolution: Optional[int] = Form(None),
+    tex_resolution: Optional[int] = Form(None),
+) -> JobOut:
+    data = await file.read()
+    opts: dict[str, Any] = {
+        "enable_texture": enable_texture if enable_texture is not None else False,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "octree_resolution": octree_resolution,
+        "tex_resolution": tex_resolution,
+    }
+    job_id = str(uuid.uuid4())
+    PUBLIC_JOBS.submit(job_id, {"image": data, **opts})
+    job = PUBLIC_JOBS.get(job_id)
+    assert job is not None
+    return JobOut(**job.snapshot())
+
+
+@app.get("/v1/public/jobs/{job_id}", response_model=JobOut)
+async def public_job_status(job_id: str) -> JobOut:
+    from .storage import MemoryStorage as _MS  # noqa: F401
+
+    job = PUBLIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404,
+                            detail="public job not found (expired or already served)")
+    return JobOut(**job.snapshot())
+
+
+@app.get("/v1/public/jobs/{job_id}/result")
+async def public_job_result(job_id: str) -> Response:
+    job = PUBLIC_JOBS.get(job_id)
+    if job is None or job.state["status"] != JobStatus.SUCCEEDED.value:
+        raise HTTPException(status_code=409, detail="result not ready")
+    data = PUBLIC_STORAGE.read_glb(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="result file missing")
+    PUBLIC_JOBS.forget(job_id)  # serve once, then purge from RAM
+    return Response(
+        content=data,
+        media_type="model/gltf-binary",
+        headers={"Content-Disposition": f'attachment; filename="{job_id}.glb"'},
+    )
 
 
 @app.get("/health", response_model=HealthOut)

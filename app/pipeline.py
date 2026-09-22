@@ -40,6 +40,7 @@ class PipelineResult:
     mesh_faces: int = 0
     texture_written: bool = False
     elapsed_s: float = 0.0
+    glb_bytes: Optional[bytes] = None
 
 
 class Hunyuan3DError(RuntimeError):
@@ -386,6 +387,7 @@ class Hunyuan3DPipeline:
         guidance_scale: Optional[float] = None,
         octree_resolution: Optional[int] = None,
         tex_resolution: Optional[int] = None,
+        return_bytes: bool = False,
         progress: Optional[callable] = None,  # fn(stage: str, pct: float)
     ) -> PipelineResult:
         use_texture = self.s.enable_texture if enable_texture is None else enable_texture
@@ -516,18 +518,30 @@ class Hunyuan3DPipeline:
 
         job_suffix = _rand_suffix()
         out_path = self.s.output_dir / f"mesh_{job_suffix}.glb"
+        glb_bytes: Optional[bytes] = None
         if hasattr(mesh, "export"):
-            try:
-                mesh.export(str(out_path))
-            except TypeError:
-                mesh.export(str(out_path), include_normals=textured or True)
+            if return_bytes:
+                buf = io.BytesIO()
+                try:
+                    mesh.export(file_obj=buf, file_type="glb")
+                except TypeError:
+                    mesh.export(buf)  # older export(obj) signatures
+                glb_bytes = buf.getvalue()
+            else:
+                try:
+                    mesh.export(str(out_path))
+                except TypeError:
+                    mesh.export(str(out_path), include_normals=textured or True)
         else:
             # v2.1 shape may return a Surface object with vertices/faces.
             verts, faces = getattr(mesh, "vertices", None), getattr(mesh, "faces", None)
             if verts is None or faces is None:
                 raise Hunyuan3DError("Pipeline returned a mesh without export() or vertices/faces.")
             md = trimesh.Trimesh(vertices=verts, faces=faces)
-            md.export(str(out_path))
+            if return_bytes:
+                glb_bytes = md.export(file_obj=io.BytesIO(), file_type="glb")
+            else:
+                md.export(str(out_path))
 
         report("export", 1.0)
         self.stats["jobs"] += 1
@@ -536,6 +550,7 @@ class Hunyuan3DPipeline:
             glb_path=out_path,
             mesh_faces=int(getattr(mesh, "faces", None).shape[0]) if getattr(mesh, "faces", None) is not None else 0,
             texture_written=textured,
+            glb_bytes=glb_bytes,
         )
 
     # -- mesh cleanup -------------------------------------------------------

@@ -16,6 +16,10 @@ async FastAPI server. Input images and output GLBs are kept **in memory** — no
 disk persistence on the remote. Everything below is done from your local Windows
 machine.
 
+> Deploying this elsewhere (any GPU box: Vast.ai, Colab, bare metal, Docker)?
+> See **[deploy.md](deploy.md)** — it documents two verified setups (Lightning
+> T4 and Vast.ai RTX 2080 Ti) plus the two API modes (disk vs RAM-only).
+
 ## Step 1 — Start opencode in this project
 
 ```bash

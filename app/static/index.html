@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Hunyuan3D 2.1 — Image to GLB</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141926; --panel2:#1a2130; --line:#2a3446;
+    --text:#e8edf6; --muted:#93a0b8; --accent:#5b9cff; --accent2:#7c5cff;
+    --ok:#3ddc84; --err:#ff6b6b; --warn:#ffc94d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:
+    radial-gradient(1200px 600px at 20% -10%, #1b2440 0%, transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, #241b40 0%, transparent 55%), var(--bg);
+    color:var(--text);min-height:100vh}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 20px 80px}
+  header h1{font-size:26px;margin:0;letter-spacing:.2px}
+  header p{color:var(--muted);margin:8px 0 0;font-size:14px}
+  .badge{display:inline-block;font-size:11px;padding:3px 10px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted);margin-left:8px;vertical-align:middle}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:26px}
+  @media(max-width:700px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  .card h2{margin:0 0 14px;font-size:15px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+
+  #drop{border:2px dashed var(--line);border-radius:12px;padding:36px 18px;text-align:center;
+    cursor:pointer;transition:.15s;background:var(--panel2)}
+  #drop.drag{border-color:var(--accent);background:#1d2840}
+  #drop .ph{font-size:34px;margin-bottom:8px}
+  #drop .main{font-weight:600}
+  #drop .sub{color:var(--muted);font-size:13px;margin-top:4px}
+  #fileInput{display:none}
+  #preview{margin-top:14px;display:none}
+  #preview img{max-width:100%;max-height:220px;border-radius:10px;display:block;margin:0 auto;
+    border:1px solid var(--line)}
+  #clearBtn{margin-top:10px;width:100%;background:transparent;color:var(--muted);
+    border:1px solid var(--line);padding:8px;border-radius:8px;cursor:pointer;font-size:13px}
+  #clearBtn:hover{color:var(--err);border-color:var(--err)}
+
+  #goBtn{margin-top:14px;width:100%;padding:13px;font-size:15px;font-weight:700;color:#fff;
+    border:none;border-radius:10px;cursor:pointer;
+    background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  #goBtn:disabled{opacity:.45;cursor:not-allowed}
+
+  #status{display:none;margin-top:14px}
+  .stage-row{display:flex;align-items:center;gap:10px;font-size:13px}
+  .spinner{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);
+    border-radius:50%;animation:spin .9s linear infinite;flex:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .bar{height:8px;border-radius:999px;background:var(--panel2);overflow:hidden;margin-top:10px}
+  .bar>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));
+    transition:width .4s}
+  .meta{color:var(--muted);font-size:12px;margin-top:8px}
+  #errBox{display:none;margin-top:14px;padding:12px;border:1px solid var(--err);border-radius:10px;
+    background:#2a1518;color:var(--err);font-size:13px;white-space:pre-wrap}
+
+  #result{display:none;margin-top:16px}
+  model-viewer{width:100%;height:340px;border-radius:12px;background:linear-gradient(180deg,#10151f,#141926);
+    border:1px solid var(--line)}
+  .res-row{display:flex;gap:10px;margin-top:12px}
+  .res-row a,.res-row button{flex:1;text-align:center;padding:12px;font-size:14px;font-weight:700;
+    border-radius:10px;text-decoration:none;cursor:pointer}
+  #dlBtn{background:linear-gradient(135deg,var(--ok),#17a86b);color:#062;border:none}
+  #againBtn{background:transparent;color:var(--muted);border:1px solid var(--line)}
+
+  .note{margin-top:22px;font-size:12px;color:var(--muted);border-top:1px solid var(--line);
+    padding-top:14px;line-height:1.6}
+  code{background:#0006;border:1px solid var(--line);padding:1px 6px;border-radius:6px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Hunyuan3D 2.1 <span class="badge">T4</span></h1>
+    <p>Upload an image of an object, get back a downloadable 3D model (GLB). One-shot image-to-3D diffusion.</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>1 · Input image</h2>
+      <div id="drop">
+        <div class="ph">🖼️</div>
+        <div class="main">Drop an image here or click to browse</div>
+        <div class="sub">PNG / JPG / WEBP · one object · clean background works best</div>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/bmp"/>
+      </div>
+      <div id="preview">
+        <img id="prevImg" alt="preview"/>
+        <button id="clearBtn">Remove image</button>
+      </div>
+      <button id="goBtn" disabled>Generate 3D model</button>
+
+      <div id="status">
+        <div class="stage-row"><div class="spinner"></div><span id="stageText">Queued…</span></div>
+        <div class="bar"><i id="barFill"></i></div>
+        <div class="meta" id="statusMeta"></div>
+      </div>
+      <div id="errBox"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Result</h2>
+      <div id="result">
+        <model-viewer id="viewer" camera-controls auto-rotate shadow-intensity="1"
+          alt="Generated 3D model"></model-viewer>
+        <div class="res-row">
+          <a id="dlBtn" download href="#">⬇ Download GLB</a>
+          <button id="againBtn">Start over</button>
+        </div>
+        <div class="meta" id="meshInfo"></div>
+      </div>
+      <div class="meta" style="margin-top:14px" id="privacy">
+        🔒 <b>Privacy:</b> your image and the generated model are processed in memory and are
+        <b>not stored or written to disk</b> on the server. Once you download the GLB, the copy is discarded.
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    API usage: <code>POST /v1/public/generate/upload</code> (multipart <code>file</code>) →
+    <code>GET /v1/public/jobs/{id}</code> (status) → <code>GET /v1/public/jobs/{id}/result</code> (GLB bytes, then purged).
+    Runs on a Tesla T4 · ~4–7 minutes per image depending on queue.
+  </div>
+</div>
+
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+<script>
+  const $ = id => document.getElementById(id);
+  const drop=$('drop'), input=$('fileInput'), img=$('prevImg');
+  let chosenFile=null;
+
+  function pick(f){ if(!f) return; if(!f.type.startsWith('image/')){ showErr('Please choose an image file.'); return; }
+    chosenFile=f; $('prevImg').src=URL.createObjectURL(f); $('preview').style.display='block';
+    $('drop').style.display='none'; $('goBtn').disabled=false; hideErr(); }
+  drop.addEventListener('click',()=>input.click());
+  drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag')});
+  drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+  drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('drag');pick(e.dataTransfer.files[0])});
+  input.addEventListener('change',()=>pick(input.files[0]));
+  $('clearBtn').addEventListener('click',()=>{ chosenFile=null; input.value='';
+    $('preview').style.display='none'; $('drop').style.display='block'; $('goBtn').disabled=true;
+    $('result').style.display='none'; hideErr(); });
+  $('againBtn').addEventListener('click',()=>{ location.reload(); });
+
+  function showErr(msg){ $('errBox').textContent=msg; $('errBox').style.display='block'; }
+  function hideErr(){ $('errBox').style.display='none'; }
+  function setStatus(on){ $('status').style.display=on?'block':'none'; }
+
+  const stageName = s => ({
+    preprocess:'Preprocessing image', shape:'Shape diffusion (GPU)…', texture:'Texture (GPU)…',
+    export:'Exporting GLB', done:'Done', running:'Processing'
+  }[s]||s||'Working');
+
+  $('goBtn').addEventListener('click', async ()=>{
+    if(!chosenFile) return;
+    $('goBtn').disabled=true; hideErr(); setStatus(true);
+    $('stageText').textContent='Uploading…'; $('barFill').style.width='0%';
+    const fd=new FormData(); fd.append('file', chosenFile); fd.append('enable_texture','false');
+    const t0=Date.now();
+    let job;
+    try{
+      const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
+      let b;
+      try{ b=await r.json(); }catch(_){
+        const raw=await r.text().catch(()=>'');
+        throw new Error(r.ok?'server returned non-JSON':('HTTP '+r.status+(raw? ' · '+raw.slice(0,120):'')));
+      }
+      if(!r.ok || b.error) throw new Error(b.error||b.detail||('HTTP '+r.status));
+      job=b.job_id;
+    }catch(e){ setStatus(false); showErr('Upload failed: '+e.message+
+      '  (Is the server up? Check it is running, then retry.)'); return; }
+
+    const poll=async()=>{
+      for(;;){
+        try{
+          const rr=await fetch('/v1/public/jobs/'+job);
+          let s;
+          try{ s=await rr.json(); }catch(_){
+            const raw=await rr.text().catch(()=>'');
+            throw new Error('HTTP '+rr.status+' non-JSON'+(raw?' · '+raw.slice(0,120):''));
+          }
+          if(!rr.ok) throw new Error(s.error||s.detail||('HTTP '+rr.status));
+          const mins=((Date.now()-t0)/60000).toFixed(1);
+          $('statusMeta').textContent='job '+job.slice(0,8)+' · elapsed '+mins+' min';
+          if(s.status==='succeeded'){
+            $('stageText').textContent='Done — fetching model…'; $('barFill').style.width='100%';
+            await downloadResult(job); return;
+          }
+          if(s.status==='failed'){ setStatus(false); showErr('Generation failed: '+(s.error||'unknown')); return; }
+          if(s.status==='cancelled'){ setStatus(false); showErr('Job cancelled.'); return; }
+          $('stageText').textContent=stageName(s.stage||'running');
+          $('barFill').style.width=((s.progress||0)*100)+'%';
+        }catch(e){ showErr('Status check failed: '+e.message); setStatus(false); return; }
+        await new Promise(r=>setTimeout(r,5000));
+      }
+    };
+    poll();
+  });
+
+  async function downloadResult(job){
+    setStatus(false);
+    try{
+      const r=await fetch('/v1/public/jobs/'+job+'/result');
+      if(!r.ok){ let b={}; try{ b=await r.json(); }catch(_){ b={}; } throw new Error(b.error||b.detail||('HTTP '+r.status)); }
+      const blob=await r.blob();
+      const url=URL.createObjectURL(blob);
+      $('dlBtn').href=url; $('dlBtn').download='hunyuan3d-'+job.slice(0,8)+'.glb';
+      const v=$('viewer'); v.src=url;
+      $('result').style.display='block';
+      try{
+        const bin=await blob.arrayBuffer();
+        // quick stats via a lightweight parse of GLB binary chunk if possible
+      }catch(_){}
+    }catch(e){ showErr('Download failed: '+e.message); }
+  }
+</script>
+</body>
+</html>

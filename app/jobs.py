@@ -167,6 +167,29 @@ class JobManager:
     def queue_depth(self) -> int:
         return max(0, self._queue.qsize() - self._active)
 
+    def forget(self, job_id: str) -> bool:
+        """Drop a finished job from memory and storage (used on RAM stores)."""
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+        if job is not None:
+            try:
+                self.storage.discard(job_id)
+            except Exception:  # noqa: BLE001
+                pass
+        return job is not None
+
+    def sweep_finished(self, ttl_seconds: float = 3600.0) -> int:
+        """Remove succeeded/failed/cancelled jobs older than ``ttl`` seconds."""
+        now = time.time()
+        done = {"succeeded", "failed", "cancelled"}
+        stale: list[str] = []
+        for jid, j in list(self._jobs.items()):
+            if j.state.get("status") in done and now - j.state.get("updated_at", 0) > ttl_seconds:
+                stale.append(jid)
+        for jid in stale:
+            self.forget(jid)
+        return len(stale)
+
     def shutdown(self) -> None:
         for _j in self._jobs.values():
             pass
