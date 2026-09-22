@@ -12,6 +12,7 @@ exceed it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass
@@ -159,6 +160,69 @@ class GpuManager:
         if info.free_gb < 12:
             return 8000
         return 16000
+
+
+class GpuAdmission:
+    """VRAM-aware concurrency guard for GPU-resident jobs.
+
+    ``auto`` mode derives the cap from live VRAM: ``floor(total_gb / per_job)``
+    so a 22 GB card admits 2 concurrent jobs (each ~9 GB), while a 14.6 GB T4
+    stays at 1. A numeric hard cap from config pins the ceiling instead.
+
+    Admission also re-checks *free* VRAM before admitting a second job so we
+    never co-load more checkpoints than the card currently holds. Call as an
+    async context manager; pairing works as ``async with admission: ...`` with
+    ``__aexit__`` releasing the slot.
+    """
+
+    def __init__(self, jobs_vram_gb: float, hard_cap: Optional[int] = None) -> None:
+        self.jobs_vram_gb = max(2.0, jobs_vram_gb)
+        self.hard_cap = hard_cap
+        self._active = 0
+        self._mutex = threading.Lock()
+
+    def cap(self) -> int:
+        """Max concurrent GPU jobs right now (auto from VRAM or fixed)."""
+        if self.hard_cap is not None:
+            return max(1, self.hard_cap)
+        info = gpu_info()
+        if not info.available or info.total_gb <= 0:
+            return 2  # CPU fallback: small bounded default
+        return max(1, int(info.total_gb // self.jobs_vram_gb))
+
+    def can_fit(self) -> bool:
+        """Enough *free* VRAM for another checkpoint (slack 1 GB)."""
+        info = gpu_info()
+        if not info.available:
+            return True
+        return info.free_gb >= max(1.0, self.jobs_vram_gb - 1.0)
+
+    async def acquire(self) -> None:
+        while True:
+            if self._try_acquire():
+                return
+            await asyncio.sleep(0.5)
+
+    async def __aenter__(self) -> "GpuAdmission":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        self.release()
+
+    def _try_acquire(self) -> bool:
+        cap = self.cap()
+        with self._mutex:
+            if self._active >= cap:
+                return False
+            if self._active and not self.can_fit():
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._mutex:
+            self._active = max(0, self._active - 1)
 
 
 gpu_manager = GpuManager({})

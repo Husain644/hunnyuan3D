@@ -81,12 +81,16 @@ class JobManager:
         self._active = 0
         self._jobs: dict[str, _Job] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._worker_task: Optional[asyncio.Task] = None
+        self._workers: list[asyncio.Task] = []
         self._lock = threading.Lock()
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = loop.create_task(self._worker())
+        if self._workers and all(not t.done() for t in self._workers):
+            return
+        self._workers = [
+            loop.create_task(self._worker())
+            for _ in range(max(1, self.max_active))
+        ]
 
     async def _worker(self) -> None:
         while True:

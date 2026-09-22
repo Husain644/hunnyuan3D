@@ -49,6 +49,18 @@ IS_COLAB = _on_colab()
 T4_USABLE_GB = 14.6
 
 
+def _active_cap_setup() -> Optional[int]:
+    """Parse HY3D_MAX_ACTIVE_JOBS: numeric = fixed cap, "auto"/empty = None
+    (resolved at runtime from measured VRAM by the GpuAdmission controller)."""
+    raw = _env("HY3D_MAX_ACTIVE_JOBS", "auto").strip().lower()
+    if raw in {"auto", "", "0", "none"}:
+        return None
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return None
+
+
 def _bank_setup() -> dict[str, float]:
     """Reserve VRAM for each pipeline stage. Sum of the listed stage does
     NOT have to fit on the GPU at once -- the pipeline serializes them."""
@@ -117,8 +129,13 @@ class Settings:
     tex_resolution: int = int(_env("HY3D_TEX_RES", "512"))
     tex_num_views: int = int(_env("HY3D_TEX_VIEWS", "6"))
 
-    # Concurrency: shape stage is not reentrant, keep at least 1 free slot
-    max_active_jobs: int = max(1, int(_env("HY3D_MAX_ACTIVE_JOBS", "1")))
+    # Concurrency: "auto" (default) picks the GPU slot count at runtime from
+    # measured VRAM (floor(total_vram_gb / jobs_vram_gb)). A numeric env value
+    # pins a fixed cap (min 1). Never exceeds what one checkpoint needs.
+    max_active_jobs: Optional[int] = field(
+        default_factory=lambda: _active_cap_setup()
+    )
+    jobs_vram_gb: float = float(_env("HY3D_JOBS_VRAM_GB", "9.0"))
 
     # Storage
     output_dir: Path = field(

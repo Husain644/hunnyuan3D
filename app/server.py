@@ -15,8 +15,11 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import shutil
+import subprocess
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -26,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .config import Settings
-from .gpu_manager import GpuManager, gpu_info, init_gpu_manager
+from .gpu_manager import GpuAdmission, GpuManager, gpu_info, init_gpu_manager
 from .jobs import JobManager
 from .pipeline import Hunyuan3DPipeline, PipelineResult, _decode_base64
 try:  # optional: Hunyuan3D-2mv (multi-view) adapter
@@ -104,9 +107,16 @@ app.add_middleware(
 init_gpu_manager(SETTINGS.vram)
 GPU: GpuManager = gpu_module.gpu_manager
 
-# One in-process GPU lock: both the disk (JOBS) and RAM-only (PUBLIC_JOBS)
-# pipelines serialize their CUDA work through it, so jobs never overlap on GPU.
-_GPU_LOCK = asyncio.Lock()
+# One in-process GPU admission controller + a pipeline instance per slot.
+# Jobs (both JOBS and PUBLIC_JOBS) must hold a slot (VRAM-aware, auto cap)
+# while their GPU phases run; the pool hands each slot its own pipeline so
+# concurrent runs never share a mutable model instance.
+GPU_ADM = GpuAdmission(jobs_vram_gb=SETTINGS.jobs_vram_gb,
+                       hard_cap=SETTINGS.max_active_jobs)
+_SLOTS = max(1, GPU_ADM.cap())
+_PIPELINE_POOL: deque = deque()
+_MV_POOL: deque = deque()
+_POOL_LOCK = asyncio.Lock()  # guards round-robin pick/return between tasks
 
 STORAGE = Storage(SETTINGS.output_dir, SETTINGS.job_dir)
 PUBLIC_STORAGE = MemoryStorage()
@@ -116,9 +126,29 @@ try:
 except Exception:  # noqa: BLE001
     logger.warning("MV pipeline not built (%s)", _MV_CLS)
     MV_PIPELINE = None
+
+for _i in range(_SLOTS):
+    _PIPELINE_POOL.append(PIPELINE)
+    if MV_PIPELINE is not None:
+        _MV_POOL.append(MV_PIPELINE)
 LOOP: Any = None
 
 SUPPORTED_MODELS = {"2.1", "2mv"}
+
+
+async def _take_pipeline(mv: bool) -> Any:
+    """Round-robin a mutable pipeline instance out of the pool."""
+    pool = _MV_POOL if mv else _PIPELINE_POOL
+    while True:
+        async with _POOL_LOCK:
+            if pool:
+                return pool.popleft()
+        await asyncio.sleep(0.1)
+
+
+def _return_pipeline(mv: bool, pipe: Any) -> None:
+    pool = _MV_POOL if mv else _PIPELINE_POOL
+    pool.append(pipe)
 
 
 # --------------------------------------------------------------------------
@@ -135,7 +165,7 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
             job.set_status(JobStatus.RUNNING, stage=stage, progress=pct,
                            message=stage)
 
-    def work() -> PipelineResult:
+    def work(pipe: Any) -> PipelineResult:
         image_src = payload["image"]
         if isinstance(image_src, str):
             img = _decode_base64(image_src)
@@ -145,7 +175,7 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
         else:
             raise ValueError("payload image must be base64 str or bytes")
         t0 = time.monotonic()
-        res = PIPELINE.run(
+        res = pipe.run(
             img,
             enable_texture=payload.get("enable_texture"),
             num_inference_steps=payload.get("num_inference_steps"),
@@ -158,10 +188,12 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
                     job_id, time.monotonic() - t0, res.mesh_faces)
         return res
 
-    import asyncio
-
-    async with _GPU_LOCK:
-        result: PipelineResult = await asyncio.to_thread(work)
+    async with GPU_ADM:
+        pipe = await _take_pipeline(mv=False)
+        try:
+            result: PipelineResult = await asyncio.to_thread(work, pipe)
+        finally:
+            _return_pipeline(False, pipe)
     dst = STORAGE.store_glb(job_id, result.glb_path)
     return {
         "result_url": f"/v1/jobs/{job_id}/result",
@@ -169,7 +201,7 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
     }
 
 
-JOBS = JobManager(STORAGE, _execute_job, max_active=SETTINGS.max_active_jobs)
+JOBS = JobManager(STORAGE, _execute_job, max_active=_SLOTS)
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +229,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
     if payload.get("description"):
         meta["description"] = payload["description"]
 
-    def work() -> PipelineResult:
+    def work(pipe: Any) -> PipelineResult:
         model = payload.get("model", "2.1")
         t0 = time.monotonic()
         if model == "2mv":
@@ -210,7 +242,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
                     views[tag] = _load_img(src)
             if not views:
                 raise ValueError("2mv requires at least one view image")
-            res = MV_PIPELINE.run(
+            res = pipe.run(
                 views,
                 num_inference_steps=payload.get("num_inference_steps"),
                 guidance_scale=payload.get("guidance_scale"),
@@ -221,7 +253,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
             )
         else:
             img = _load_img(payload["image"])
-            res = PIPELINE.run(
+            res = pipe.run(
                 img,
                 enable_texture=payload.get("enable_texture", False),
                 num_inference_steps=payload.get("num_inference_steps"),
@@ -236,15 +268,20 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
                     job_id, model, time.monotonic() - t0, res.mesh_faces)
         return res
 
-    async with _GPU_LOCK:
-        result: PipelineResult = await asyncio.to_thread(work)
+    async with GPU_ADM:
+        mv = payload.get("model", "2.1") == "2mv"
+        pipe = await _take_pipeline(mv)
+        try:
+            result: PipelineResult = await asyncio.to_thread(work, pipe)
+        finally:
+            _return_pipeline(mv, pipe)
     if result.glb_bytes:
         PUBLIC_STORAGE.store_glb_bytes(job_id, result.glb_bytes)
     return {"result_url": f"/v1/public/jobs/{job_id}/result"}
 
 
 PUBLIC_JOBS = JobManager(PUBLIC_STORAGE, _execute_job_public,
-                         max_active=SETTINGS.max_active_jobs)
+                         max_active=_SLOTS)
 
 
 async def _public_sweeper() -> None:
@@ -385,19 +422,93 @@ def _download_name(job: Any) -> str:
     return f"{safe}_{job.job_id[:8]}"
 
 
+# --------------------------------------------------------------------------
+# live system stats
+# --------------------------------------------------------------------------
+_CPU_STATE: list[int] = []
+_GPU_UTIL_CACHE: list[float] = []
+_GPU_UTIL_T = 0.0
+
+
+def _read_stat() -> list[int]:
+    try:
+        with open("/proc/stat") as fh:
+            parts = fh.readline().split()[1:]
+        return [int(x) for x in parts]
+    except Exception:  # noqa: BLE001 (non-Linux)
+        return []
+
+
+def _cpu_percent() -> Optional[float]:
+    """CPU utilisation over a ~200 ms /proc/stat delta."""
+    global _CPU_STATE
+    now = _read_stat()
+    if not now:
+        return None
+    if _CPU_STATE:
+        idle = now[3] - _CPU_STATE[3]
+        tot = sum(now) - sum(_CPU_STATE)
+        _CPU_STATE = now
+        if tot <= 0:
+            return None
+        return round(max(0.0, min(100.0, 100.0 * (1.0 - idle / tot))), 1)
+    _CPU_STATE = now
+    return 0.0
+
+
+async def _gpu_util() -> Optional[float]:
+    global _GPU_UTIL_CACHE, _GPU_UTIL_T
+    now = time.time()
+    if _GPU_UTIL_CACHE and now - _GPU_UTIL_T < 1.0:
+        return _GPU_UTIL_CACHE[0]
+    try:
+        out = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3,
+            ),
+        )
+        val = float(out.stdout.strip().splitlines()[0])
+    except Exception:  # noqa: BLE001
+        val = None
+    _GPU_UTIL_CACHE = [val]
+    _GPU_UTIL_T = now
+    return val
+
+
+def _disk_free_gb() -> Optional[float]:
+    try:
+        return round(shutil.disk_usage(str(SETTINGS.output_dir)).free / 1e9, 1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @app.get("/health", response_model=HealthOut)
 async def health() -> HealthOut:
     info = gpu_info()
+    if SETTINGS.max_active_jobs is None:
+        admission = "auto"
+    else:
+        admission = f"fixed:{SETTINGS.max_active_jobs}"
     return HealthOut(
         status="ok" if info.available else "degraded",
         gpu_name=info.name,
         vram_total_gb=info.total_gb if info.total_gb else None,
         vram_used_gb=info.used_gb,
-        active_jobs=JOBS.active,
-        max_active_jobs=JOBS.max_active,
-        queue_depth=JOBS.queue_depth,
+        active_jobs=JOBS.active + PUBLIC_JOBS.active,
+        max_active_jobs=GPU_ADM.cap(),
+        active_cap=GPU_ADM.cap(),
+        admission=admission,
+        queue_depth=JOBS.queue_depth + PUBLIC_JOBS.queue_depth,
         texture_enabled=SETTINGS.enable_texture,
         model_repo=SETTINGS.model_repo,
+        gpu_util=await _gpu_util(),
+        cpu_percent=await asyncio.get_running_loop().run_in_executor(
+            None, _cpu_percent
+        ),
+        disk_free_gb=_disk_free_gb(),
     )
 
 

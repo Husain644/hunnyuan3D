@@ -121,6 +121,13 @@
   .note{margin-top:22px;font-size:12px;color:var(--muted);border-top:1px solid var(--line);
     padding-top:14px;line-height:1.7}
   code{background:#0006;border:1px solid var(--line);padding:1px 6px;border-radius:6px;font-size:12px}
+  #sysstats{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--muted);
+    border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:6px 2px;
+    margin-bottom:8px;letter-spacing:.2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  #sysstats b{color:var(--text);font-weight:600}
+  #sysstats .ok{color:#2ecc71}
+  #sysstats .warn{color:#e67e22}
+  #sysstats .hot{color:#e74c3c}
 </style>
 </head>
 <body>
@@ -131,10 +138,11 @@
     <span id="logClock"></span>
     <button id="logClear" title="Clear log">clear</button>
   </div>
+  <div id="sysstats">loading system stats…</div>
 
   <header>
     <h1>Hunyuan3D <span class="badge" id="modelBadge">2.1 · Batch</span></h1>
-    <p>Turn photos into a downloadable 3D model (GLB). Single images (2.1) or up to four views (2mv) — processed one job at a time.</p>
+    <p>Turn photos into a downloadable 3D model (GLB). Single images (2.1) or up to four views (2mv) — server auto-scales concurrency to free VRAM.</p>
   </header>
 
   <div class="grid">
@@ -357,84 +365,97 @@
   /* ---------- generation ---------- */
   $('goBtn').addEventListener('click',()=>{ $('goBtn').disabled=true; hideErr(); pump(); });
 
+  /* ---------- system stats ticker ---------- */
+  const bytes2gb = x => (x/1073741824).toFixed(1);
+  async function tickStats(){
+    try{
+      const r=await fetch('/health');
+      const h=await r.json();
+      const vram = h.vram_total_gb?`${bytes2gb((h.vram_used_gb||0)*1073741824)}/${h.vram_total_gb} GB`: 'n/a';
+      const mb=( (h.vram_used_gb||0)/ (h.vram_total_gb||1) *100 ).toFixed(0);
+      const util = h.gpu_util==null?'?':h.gpu_util+'%';
+      const utilCls = h.gpu_util==null?'':(h.gpu_util>=80?'ok':(h.gpu_util>=40?'warn':''));
+      const cpu = h.cpu_percent==null?'?':h.cpu_percent+'%';
+      const disk = h.disk_free_gb==null?'?':h.disk_free_gb+' GB free';
+      const jobs = `${h.active_cap} slot`+(h.active_cap!==1?'s':'')+' · '+(h.admission||'auto');
+      $('sysstats').innerHTML =
+        `GPU <b>${vram}</b> (${mb}%) · util <b class="ok ${utilCls}">${util}</b> · `+
+        `<b>CPU ${cpu}</b> · disk <b>${disk}</b> · jobs ${jobs} · active ${h.active_jobs} / queued ${h.queue_depth}`;
+    }catch(_){ $('sysstats').textContent='stats unavailable'; }
+  }
+  setInterval(tickStats,3000);
+  tickStats();
+
   async function pump(){
     if(generating) return;
-    const item = queue.find(q=>q.status==='todo');
-    if(!item){ generating=false; $('goBtn').disabled=false; renderQueue(); log('All done — '+
-      queue.filter(q=>q.status==='ok').length+' model(s) ready','ok'); return; }
+    const todo = queue.filter(q=>q.status==='todo');
+    if(!todo.length){ generating=true; renderQueue(); log('All done — '+
+      queue.filter(q=>q.status==='ok').length+' model(s) ready','ok'); generating=false; renderQueue(); return; }
     generating=true;
-    item.status='wait';
-    renderQueue();
-    await generateItem(item);
-    generating=false;
-    renderQueue();
-    pump();
-  }
-
-  async function generateItem(item){
-    const t0=Date.now();
-    item.status='wait';
-    log('uploading '+labelOf(item)+' …','busy');
-    let job;
-    try{
-      const fd=new FormData();
-      fd.append('model', item.type);
-      if(item.name) fd.append('name', item.name);
-      if(item.desc) fd.append('description', item.desc);
-      if(item.type==='2mv'){
-        for(const tag of ['front','back','left','right']) if(item.views[tag]) fd.append('view_'+tag, item.views[tag]);
-      } else {
-        fd.append('file', item.file); fd.append('enable_texture','false');
-      }
-      const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
-      let b; try{ b=await r.json(); }catch(_){
-        const raw=await r.text().catch(()=>'');
-        throw new Error(r.ok?'non-JSON response':('HTTP '+r.status+(raw?' · '+raw.slice(0,120):'')));
-      }
-      if(!r.ok || b.error) throw new Error(b.error||b.detail||('HTTP '+r.status));
-      job=b.job_id; item.jobId=job;
-      log(`uploaded ${labelOf(item)} → job ${job.slice(0,8)}`,'busy');
-    }catch(e){
-      item.status='fail'; item.err=e.message.slice(0,120);
-      log(`FAILED ${labelOf(item)}: ${e.message}`,'wait');
-      return;
+    const done=[];
+    log(`submitting ${todo.length} job(s) — server auto-scales to free VRAM`,'busy');
+    for(const item of todo){
+      item.status='wait'; renderQueue();
+      try{ item.jobId = await submitItem(item); done.push(item); }
+      catch(e){ item.status='fail'; item.err=e.message.slice(0,120);
+        log(`FAILED ${labelOf(item)}: ${e.message}`,'wait'); }
     }
-
-    const stageName=s=>({preprocess:'preprocess',shape:'shape diffusion (GPU)',texture:'texture (GPU)',
-      export:'exporting GLB',done:'done',running:'running'}[s]||s||'working');
-    for(;;){
-      let s;
-      try{
-        const rr=await fetch('/v1/public/jobs/'+job);
-        let j; try{ j=await rr.json(); }catch(_){
-          const raw=await rr.text().catch(()=>'');
-          throw new Error('HTTP '+rr.status+' non-JSON'+(raw?' · '+raw.slice(0,80):''));
-        }
-        if(!rr.ok) throw new Error(j.error||j.detail||('HTTP '+rr.status));
-        s=j;
-      }catch(e){
-        item.status='fail'; item.err=e.message.slice(0,120);
-        log(`FAILED ${labelOf(item)}: ${e.message}`,'wait');
-        return;
-      }
-      const mins=((Date.now()-t0)/60000).toFixed(1);
-      item.el=mins; item.progress=s.progress; item.stage=s.stage;
-      const line=`${labelOf(item)} · ${stageName(s.stage||'')} · ${Math.round((s.progress||0)*100)}% · ${mins}m`;
-      if(s.status==='running'){ log(line,'busy'); }
-      if(s.status==='succeeded'){
-        item.status='doing'; item.progress=1; renderQueue(); item.status='ok';
-        log(`DONE ${labelOf(item)}`,'ok');
-        renderQueue();
-        grabResult(item);
-        return;
-      }
-      if(s.status==='failed'||s.status==='cancelled'){
-        item.status='fail'; item.err=(s.error||s.status).slice(0,120);
-        log(`FAILED ${labelOf(item)}: ${item.err}`,'wait');
-        return;
+    renderQueue();
+    while(done.length){
+      await new Promise(r=>setTimeout(r,4000));
+      let finished=0;
+      for(const item of done){
+        if(item.status==='ok'||item.status==='fail'){ finished++; continue; }
+        await tickJob(item);
+        if(item.status==='ok'||item.status==='fail') finished++;
       }
       renderQueue();
-      await new Promise(r=>setTimeout(r,4000));
+      if(finished===done.length) break;
+    }
+    generating=false;
+    renderQueue();
+    if(queue.every(q=>q.status==='ok')) log('All done — '+queue.length+' model(s) ready','ok');
+  }
+
+  async function submitItem(item){
+    const fd=new FormData();
+    fd.append('model', item.type);
+    if(item.name) fd.append('name', item.name);
+    if(item.desc) fd.append('description', item.desc);
+    if(item.type==='2mv'){
+      for(const tag of ['front','back','left','right']) if(item.views[tag]) fd.append('view_'+tag, item.views[tag]);
+    } else {
+      fd.append('file', item.file); fd.append('enable_texture','false');
+    }
+    const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
+    let b; try{ b=await r.json(); }catch(_){
+      const raw=await r.text().catch(()=>'');
+      throw new Error(r.ok?'non-JSON response':('HTTP '+r.status+(raw?' · '+raw.slice(0,120):'')));
+    }
+    if(!r.ok || b.error) throw new Error(b.error||b.detail||('HTTP '+r.status));
+    log(`uploaded ${labelOf(item)} → job ${b.job_id.slice(0,8)}`,'busy');
+    item.el=0; item.progress=0; item.stage='queued';
+    return b.job_id;
+  }
+
+  async function tickJob(item){
+    const stageName=s=>({preprocess:'preprocess',shape:'shape diffusion (GPU)',
+      texture:'texture (GPU)',export:'exporting GLB',done:'done',running:'running'}[s]||s||'working');
+    try{
+      const rr=await fetch('/v1/public/jobs/'+item.jobId);
+      const j=await rr.json();
+      if(!rr.ok) throw new Error(j.error||j.detail||('HTTP '+rr.status));
+      item.el=( (Date.now() - (item._t0||(item._t0=Date.now())))/60000 ).toFixed(1);
+      item.progress=j.progress; item.stage=j.stage;
+      if(j.status==='running') item.status='doing';
+      if(j.status==='succeeded'){ item.progress=1; item.status='ok';
+        log(`DONE ${labelOf(item)}`,'ok'); renderQueue(); await grabResult(item); return; }
+      if(j.status==='failed'||j.status==='cancelled'){ item.status='fail';
+        item.err=(j.error||j.status).slice(0,120);
+        log(`FAILED ${labelOf(item)}: ${item.err}`,'wait'); return; }
+    }catch(e){
+      if(item.status!=='ok'){ item.status='fail'; item.err=(e.message||'error').slice(0,120);
+        log(`FAILED ${labelOf(item)}: ${e.message}`,'wait'); }
     }
   }
 

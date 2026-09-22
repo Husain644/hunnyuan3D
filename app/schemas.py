@@ -64,9 +64,14 @@ class HealthOut(BaseModel):
     vram_used_gb: float = 0.0
     active_jobs: int
     max_active_jobs: int
+    active_cap: int = 1
+    admission: str = "auto"
     queue_depth: int
     texture_enabled: bool
     model_repo: str
+    gpu_util: Optional[float] = None
+    cpu_percent: Optional[float] = None
+    disk_free_gb: Optional[float] = None
 
 
 class ErrorOut(BaseModel):
