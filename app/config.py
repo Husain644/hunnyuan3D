@@ -91,15 +91,22 @@ class Settings:
     host: str = _env("HY3D_HOST", "0.0.0.0")
     port: int = int(_env("HY3D_PORT", "8080"))
     log_level: str = _env("HY3D_LOG_LEVEL", "info")
+    debug: bool = _env("HY3D_DEBUG", "0").lower() not in {"0", "false", "no"}
 
-    # Whether to actually load the Paint/texture stage. Texture is what
-    # pushes v2.1 past a 14.6 GB T4, so it defaults OFF on Colab T4 runtimes
-    # (explicit HY3D_ENABLE_TEXTURE still wins).
-    _tex_default = "0" if IS_COLAB else "1"
-    enable_texture: bool = _env("HY3D_ENABLE_TEXTURE", _tex_default).lower() not in {"0", "false", "no"}
-    # Background removal defaults off on Colab (extra model + onnx runtime).
-    _rembg_default = "0" if IS_COLAB else "1"
-    enable_rembg: bool = _env("HY3D_ENABLE_REMBG", _rembg_default).lower() not in {"0", "false", "no"}
+    # Texture/rembg default OFF: both load extra multi-GB weights and need a
+    # large GPU (texture >= 21 GB + compiled rasterizer). Opt in explicitly
+    # with HY3D_ENABLE_TEXTURE=1 / HY3D_ENABLE_REMBG=1 in .env.
+    enable_texture: bool = _env("HY3D_ENABLE_TEXTURE", "0").lower() not in {"0", "false", "no"}
+    enable_rembg: bool = _env("HY3D_ENABLE_REMBG", "0").lower() not in {"0", "false", "no"}
+
+    # Upload cap (MiB); FastAPI rejects larger public uploads with HTTP 413.
+    max_upload_mb: int = int(_env("HY3D_MAX_UPLOAD_MB", "20"))
+
+    # Comma-separated allowed CORS origins. "*" disables the origin check.
+    @property
+    def cors_origins(self) -> list[str]:
+        raw = _env("HY3D_CORS_ORIGINS", "*")
+        return [o.strip() for o in raw.split(",") if o.strip()] or ["*"]
 
     # Diffusion / mesh extraction knobs (see hy3dshape.pipelines)
     num_inference_steps: int = int(_env("HY3D_STEPS", "30"))

@@ -1,5 +1,15 @@
 # Deploying Hunyuan3D 2.1 API
 
+> **Starting on a fresh machine?** Use the one-command reproducible setup —
+> GPU gate → venv → pinned deps → model source → checkpoints → .env →
+> validation — instead of the manual steps below:
+> ```bash
+> git clone git@github.com:Husain644/hunnyuan3D.git
+> cd hunnyuan3D && ./setup.sh --start
+> ```
+> The rest of this document details the two *verified* deployments and the
+> manual config they rely on.
+
 Two production setups have been **verified end-to-end** (image in → GLB out):
 
 | Target | GPU | VRAM | Storage | Works for |

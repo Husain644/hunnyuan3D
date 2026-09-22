@@ -5,32 +5,42 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hunyuan3d-api"
 version = "0.1.0"
-description = "Async FastAPI service around Hunyuan3D 2.1 image-to-3D with T4-optimized CPU offloading"
+description = "Async FastAPI service around Hunyuan3D 2.1 / 2mv image-to-3D with T4-optimized CPU offloading"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
 dependencies = [
-  "fastapi>=0.110",
-  "uvicorn[standard]>=0.29",
+  "python-dotenv>=1.0",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
   "pydantic>=2.6",
   "pillow>=10.0",
-  "numpy>=1.24",
-  "torch>=2.4",
+  "numpy>=1.26",
+  "huggingface-hub>=0.23",
+  "transformers==4.46.0",
+  "diffusers==0.30.0",
   "accelerate>=0.30",
-  "trimesh>=4.0",
-  "diffusers>=0.28",
+  "safetensors>=0.4",
   "einops",
   "omegaconf",
+  "pyyaml",
+  "scipy>=1.11",
+  "scikit-image>=0.24",
+  "timm",
   "tqdm",
-  "python-multipart>=0.0.9",
-]
-
-[project.optional-dependencies]
-shape = ["pymeshlab>=2023.12"]
-tex = [
-  "opencv-python-headless>=4.9",
+  "trimesh>=4.0",
   "xatlas>=0.0.9",
   "pygltflib>=1.16",
+  "python-multipart>=0.0.9",
+]
+# NOTE: torch/torchvision are intentionally NOT listed here (a plain
+# `pip install .` would pull an unpinned, wrong-platform build). Install via
+# requirements-gpu.txt (CUDA-pinned) using setup.sh instead.
+
+[project.optional-dependencies]
+tex = [
+  "opencv-python-headless>=4.9",
+  "pymeshlab>=2023.12",
   "rembg>=2.0",
   "onnxruntime-gpu>=1.17",
 ]

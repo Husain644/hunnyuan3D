@@ -1,23 +1,39 @@
+# requirements.txt — core application + model/GLB dependencies.
+#
+# PyTorch/torchvision live in requirements-gpu.txt (CUDA-pinned wheels), NOT
+# here, so a fresh ``pip install -r requirements.txt`` never grabs an
+# accidental CPU build.  setup.sh installs requirements-gpu.txt which pulls
+# this file in automatically.
+#
+# Versions below are pinned to the exact set verified end-to-end on the
+# working deployments (Lightning.ai T4 + Vast.ai RTX 2080 Ti).  Do not bump
+# randomly; several of these (transformers/diffusers/timm/scikit-image) are
+# hard imports of the Hunyuan3D-2.1 ``hy3dshape`` source tree.
+
+# --- core service ---
 python-dotenv>=1.0
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
 pydantic>=2.6
+python-multipart>=0.0.9
 pillow>=10.0
 numpy>=1.26
-torch>=2.4
-torchvision>=0.19
+
+# --- model / inference (required by hy3dshape/hy3dpaint at import time) ---
+huggingface-hub>=0.23
+transformers==4.46.0
+diffusers==0.30.0
 accelerate>=0.30
-trimesh>=4.0
-diffusers>=0.28
+safetensors>=0.4
 einops
 omegaconf
+pyyaml
+scipy>=1.11
+scikit-image>=0.24        # skimage.measure in surface_extractors.py
+timm                      # timm.models.vision_transformer in moe_layers.py
 tqdm
-python-multipart>=0.0.9
-# Optional texture + postprocess deps (v2.1 needs the custom rasterizer built
-# from source under hy3dpaint/custom_rasterizer).
-opencv-python-headless>=4.9
+
+# --- GLB export ---
+trimesh>=4.0
 xatlas>=0.0.9
 pygltflib>=1.16
-rembg>=2.0
-onnxruntime-gpu>=1.17
-pymeshlab>=2023.12

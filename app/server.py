@@ -64,9 +64,28 @@ async def lifespan(_app: FastAPI):
     JOBS.start(LOOP)
     PUBLIC_JOBS.start(LOOP)
     task = asyncio.create_task(_public_sweeper())
+
+    # Startup banner: which checkpoints are actually available to serve.
+    try:
+        from .models_check import all_status  # noqa: F401
+
+        agg = all_status()
+        if agg["ready"]:
+            logger.info("models ready: %s (cache: %s)",
+                        ", ".join(agg["ready"]) or "(none)", agg["cache_dir"])
+        else:
+            logger.warning(
+                "NO model checkpoints found in %s. Generation will fail until: "
+                ".venv/bin/python scripts/model_bootstrap.py",
+                agg["cache_dir"],
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("could not check model checkpoints at startup")
     yield
     task.cancel()
 
+
+SETTINGS = Settings()
 
 app = FastAPI(
     title="Hunyuan3D 2.1 API",
@@ -78,12 +97,10 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=SETTINGS.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-SETTINGS = Settings()
 init_gpu_manager(SETTINGS.vram)
 GPU: GpuManager = gpu_module.gpu_manager
 
@@ -127,7 +144,8 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
             img.load()
         else:
             raise ValueError("payload image must be base64 str or bytes")
-        return PIPELINE.run(
+        t0 = time.monotonic()
+        res = PIPELINE.run(
             img,
             enable_texture=payload.get("enable_texture"),
             num_inference_steps=payload.get("num_inference_steps"),
@@ -136,6 +154,9 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
             tex_resolution=payload.get("tex_resolution"),
             progress=progress,
         )
+        logger.info("job %s done in %.1fs (faces=%d)",
+                    job_id, time.monotonic() - t0, res.mesh_faces)
+        return res
 
     import asyncio
 
@@ -178,6 +199,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
 
     def work() -> PipelineResult:
         model = payload.get("model", "2.1")
+        t0 = time.monotonic()
         if model == "2mv":
             if MV_PIPELINE is None:
                 raise RuntimeError("multi-view model not available on this host")
@@ -188,7 +210,7 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
                     views[tag] = _load_img(src)
             if not views:
                 raise ValueError("2mv requires at least one view image")
-            return MV_PIPELINE.run(
+            res = MV_PIPELINE.run(
                 views,
                 num_inference_steps=payload.get("num_inference_steps"),
                 guidance_scale=payload.get("guidance_scale"),
@@ -197,18 +219,22 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
                 metadata=meta or None,
                 progress=progress,
             )
-        img = _load_img(payload["image"])
-        return PIPELINE.run(
-            img,
-            enable_texture=payload.get("enable_texture", False),
-            num_inference_steps=payload.get("num_inference_steps"),
-            guidance_scale=payload.get("guidance_scale"),
-            octree_resolution=payload.get("octree_resolution"),
-            tex_resolution=payload.get("tex_resolution"),
-            return_bytes=True,
-            metadata=meta or None,
-            progress=progress,
-        )
+        else:
+            img = _load_img(payload["image"])
+            res = PIPELINE.run(
+                img,
+                enable_texture=payload.get("enable_texture", False),
+                num_inference_steps=payload.get("num_inference_steps"),
+                guidance_scale=payload.get("guidance_scale"),
+                octree_resolution=payload.get("octree_resolution"),
+                tex_resolution=payload.get("tex_resolution"),
+                return_bytes=True,
+                metadata=meta or None,
+                progress=progress,
+            )
+        logger.info("public job %s (%s) done in %.1fs (faces=%d)",
+                    job_id, model, time.monotonic() - t0, res.mesh_faces)
+        return res
 
     async with _GPU_LOCK:
         result: PipelineResult = await asyncio.to_thread(work)
@@ -264,6 +290,17 @@ async def public_generate_upload(
     if model == "2mv" and MV_PIPELINE is None:
         raise HTTPException(status_code=503,
                             detail="multi-view model not available on this host")
+    max_bytes = SETTINGS.max_upload_mb * 1024 * 1024
+
+    async def _cap(name: str, data: bytes) -> bytes:
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"'{name}' exceeds the {SETTINGS.max_upload_mb} MB "
+                       f"upload limit ({len(data)} bytes)",
+            )
+        return data
+
     if model == "2mv":
         views = {
             "front": view_front,
@@ -279,15 +316,16 @@ async def public_generate_upload(
             "name": (name or "").strip() or None,
             "description": (description or "").strip() or None,
             **{
-                f"view_{tag}": (await v.read()) if v is not None else None
-                for tag, v in views.items()
+                f"view_{tag}": (
+                    await _cap(tag, await v.read()) if v is not None else None
+                ) for tag, v in views.items()
             },
         }
     else:
         if file is None:
             raise HTTPException(status_code=400,
                                 detail="'file' image is required for model 2.1")
-        data = await file.read()
+        data = await _cap("file", await file.read())
         payload = {
             "model": model,
             "image": data,
@@ -361,6 +399,30 @@ async def health() -> HealthOut:
         texture_enabled=SETTINGS.enable_texture,
         model_repo=SETTINGS.model_repo,
     )
+
+
+@app.get("/health/models")
+async def health_models() -> dict:
+    """Checkpoint availability for each supported model (never downloads)."""
+    from .models_check import all_status
+
+    agg = all_status()
+    ready = sorted(agg["ready"])
+    return {
+        "status": "ok" if ready else "degraded",
+        "supported": sorted(SUPPORTED_MODELS),
+        "ready": ready,
+        "missing": sorted(agg["missing"]),
+        "cache_dir": agg["cache_dir"],
+        "models": {
+            mid: {
+                "ready": st["valid"],
+                "size_bytes": st["size_bytes"],
+                "note": st["reason"] or "ready",
+            }
+            for mid, st in agg["models"].items()
+        },
+    }
 
 
 @app.post("/v1/generate", response_model=JobOut, status_code=202)

@@ -1,0 +1,18 @@
+# requirements-gpu.txt — CUDA-pinned PyTorch wheels.
+#
+# Installed by setup.sh AFTER the base requirements. Uses the PyTorch index
+# for CUDA 12.4 wheels. These builds support NVIDIA compute capability >= 7.5
+# (Turing / RTX 20-series and newer, incl. T4, 2080 Ti, 4090, A10, L4, A100,
+# H100, B200).
+#
+# The versions match what the existing T4 / RTX 2080 Ti deployments were
+# validated against. Do not upgrade casually: the v2.1 shape pipeline loads on
+# CUDA fp16 and depends on these exact wheel families.
+#
+# Usage:
+#   .venv/bin/pip install -r requirements-gpu.txt
+-r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.5.1
+torchvision==0.20.1

@@ -1,0 +1,883 @@
+Transform the existing Image → 3D project into a genuinely reproducible, one-command setup for a completely new developer/server.
+
+## GOAL
+
+After a developer clones the GitHub repository onto a compatible GPU machine, they should be able to run ONE setup/start command and get a fully working application.
+
+Target workflow:
+
+```bash
+git clone <repository>
+cd <project>
+./setup.sh
+```
+
+After setup completes:
+
+* dependencies installed
+* Python environment created/configured
+* FastAPI application configured
+* required directories created
+* required model/checkpoint files downloaded or verified
+* environment/configuration prepared
+* application started
+* public Image → 3D page accessible
+* 2.1 single-view generation works
+* 2mv multi-view generation works
+* GLB result/download works
+
+A new developer should NOT need to manually execute a long list of commands.
+
+IMPORTANT:
+
+First inspect the complete repository and understand the current working deployment.
+
+The current project already has:
+
+* FastAPI public Image → 3D application
+* Hunyuan3D-2.1 pipeline
+* Hunyuan3D-2mv adapter
+* public generation API
+* model selector
+* single-view generation
+* multi-view generation
+* GLB result/download
+* object name
+* object description
+* front/back/left/right views
+* job/status/result flow
+
+Preserve all currently working functionality.
+
+Do NOT migrate the project to Django or introduce Django.
+
+Use the existing FastAPI architecture.
+
+==================================================
+
+1. ONE COMMAND
+   ==================================================
+
+Create one canonical bootstrap command:
+
+```bash
+./setup.sh
+```
+
+It must be safe to run from a fresh clone.
+
+If setup has already been completed, running it again should be idempotent:
+
+* don't unnecessarily redownload huge model files
+* don't recreate working environments
+* don't destroy existing generated data
+* verify existing dependencies instead
+* repair missing pieces when possible
+
+If technically cleaner, setup.sh may prepare everything and then start the application.
+
+If setup and startup need to remain separate, provide:
+
+```bash
+./setup.sh
+./run.sh
+```
+
+But minimize the number of commands required for a new developer.
+
+==================================================
+2. HARDWARE DETECTION
+=====================
+
+Detect the machine before installing GPU dependencies.
+
+Check:
+
+* NVIDIA GPU availability
+* GPU name
+* VRAM
+* NVIDIA driver
+* CUDA compatibility
+* Python version
+
+Print a clear summary:
+
+```text
+========================================
+Image → 3D Setup
+========================================
+
+GPU: NVIDIA RTX 4090
+VRAM: 24 GB
+CUDA: ...
+Python: ...
+========================================
+```
+
+Do not hard-code RTX 4090/T4/etc.
+
+The project should work on compatible NVIDIA GPUs within the actual memory requirements of the installed models.
+
+If no compatible GPU is detected, stop with a useful explanation instead of failing later during model loading.
+
+Do NOT automatically install NVIDIA drivers.
+
+Do NOT perform dangerous system-level GPU modifications.
+
+==================================================
+3. PYTHON ENVIRONMENT
+=====================
+
+Create a project-local virtual environment:
+
+```text
+.venv/
+```
+
+Do not require the developer to manually activate it.
+
+The setup script should directly use:
+
+```text
+.venv/bin/python
+.venv/bin/pip
+```
+
+Detect and validate the Python version based on the actual FastAPI/Hunyuan requirements.
+
+Create a clean dependency strategy.
+
+For example:
+
+```text
+requirements.txt
+requirements-gpu.txt
+```
+
+or another structure if the current repository already has a better one.
+
+Pin important versions where required for reproducibility, especially:
+
+* torch
+* torchvision
+* CUDA-specific PyTorch packages
+* Hunyuan dependencies
+* FastAPI
+* Uvicorn
+* related inference libraries
+
+Do not randomly upgrade working packages.
+
+==================================================
+4. MODEL/CHECKPOINT MANAGEMENT
+==============================
+
+This is critical.
+
+Do NOT make a new developer manually download checkpoints.
+
+Create a model bootstrap system.
+
+For example:
+
+```text
+models/
+  hunyuan3d-2.1/
+  hunyuan3d-2mv/
+```
+
+Use the actual model structure required by the current implementation.
+
+The setup process must:
+
+1. Check whether required checkpoints exist.
+2. Verify that they are complete.
+3. Download missing checkpoints automatically.
+4. Never redownload an existing valid checkpoint.
+5. Show useful download progress.
+6. Fail with a clear error if authentication/access is required.
+
+Do NOT commit multi-GB model weights into Git.
+
+Use environment/configuration variables for model locations where appropriate.
+
+Document:
+
+* exact model name
+* source
+* expected files
+* approximate size
+* whether Hugging Face authentication is required
+* license/usage requirements
+
+The application should detect missing model files at startup and give a useful message.
+
+==================================================
+5. CONFIGURATION
+================
+
+Create a clean environment configuration system.
+
+Provide:
+
+```text
+.env.example
+```
+
+with all required variables.
+
+Inspect the existing code and use the actual variable names where possible.
+
+Possible configuration includes:
+
+```text
+HOST=
+PORT=
+DEBUG=
+MODEL_2_1_PATH=
+MODEL_2MV_PATH=
+OUTPUT_DIR=
+UPLOAD_DIR=
+MAX_UPLOAD_SIZE=
+GPU_DEVICE=
+```
+
+Do not invent variables that the application does not need.
+
+setup.sh should create `.env` from `.env.example` if it does not exist.
+
+Never commit:
+
+* secrets
+* API keys
+* tokens
+* private credentials
+* local machine paths
+
+Do not hard-code paths such as:
+
+```text
+E:\...
+/home/user/...
+/workspace/...
+/mnt/...
+```
+
+Everything must use project-relative paths or environment variables.
+
+==================================================
+6. FASTAPI APPLICATION STARTUP
+==============================
+
+Use the existing FastAPI entry point.
+
+First identify the actual module, for example:
+
+```text
+app.main:app
+```
+
+Do not assume this exact path; inspect the repository.
+
+Create a clean startup command using Uvicorn or the existing production ASGI server.
+
+Example:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Use the actual project entry point.
+
+The startup script must:
+
+* use `.venv`
+* load `.env`
+* use configured host/port
+* start the FastAPI application
+* show the application URL
+
+Example output:
+
+```text
+========================================
+Image → 3D is running
+========================================
+
+Local:
+http://127.0.0.1:8000
+
+Network:
+http://<server-ip>:8000
+
+API:
+http://<server-ip>:8000/docs
+
+Models:
+2.1     READY
+2mv     READY
+
+GPU:
+NVIDIA ...
+
+========================================
+```
+
+==================================================
+7. FASTAPI HEALTH CHECK
+=======================
+
+Add or preserve a reliable:
+
+```text
+GET /health
+```
+
+endpoint.
+
+It should verify basic application readiness.
+
+If useful, provide:
+
+```text
+GET /health/models
+```
+
+or another appropriate endpoint.
+
+Health information should distinguish:
+
+* application running
+* required dependencies available
+* GPU available
+* 2.1 model available
+* 2mv model available
+
+Do not perform expensive 3D generation during a health check.
+
+==================================================
+8. MODEL LOADING
+================
+
+Inspect how the current application loads Hunyuan3D.
+
+Do not unnecessarily load both large models into VRAM simultaneously if the current GPU cannot safely hold them.
+
+Preserve the existing model-loading strategy.
+
+If the application already has lazy loading/model caching, keep it.
+
+The final setup must not accidentally cause:
+
+```text
+2.1 + 2mv
+```
+
+to simultaneously consume all GPU memory unless the existing hardware supports it.
+
+If model switching requires unloading one model before loading another, implement that safely.
+
+==================================================
+9. PUBLIC API
+=============
+
+Preserve the existing public API:
+
+```text
+POST /v1/public/generate/upload
+```
+
+It currently supports:
+
+```text
+model=2.1|2mv
+view_front
+view_back
+view_left
+view_right
+name
+description
+```
+
+Do not break this API.
+
+Expected behavior:
+
+### 2.1
+
+Main image is used for the existing 2.1 workflow.
+
+### 2mv
+
+Front view is required.
+
+Back/left/right are optional.
+
+Use the actual 2mv adapter.
+
+Invalid model:
+
+```text
+HTTP 400
+```
+
+2mv without the required front view:
+
+```text
+HTTP 400
+```
+
+Keep the existing response structure unless there is a strong reason to change it.
+
+==================================================
+10. JOB/STATUS/RESULT FLOW
+==========================
+
+Inspect the current asynchronous generation architecture.
+
+Preserve the existing:
+
+```text
+upload
+  ↓
+job creation
+  ↓
+generation
+  ↓
+status
+  ↓
+result
+  ↓
+GLB download
+```
+
+Do not create a second unrelated job system.
+
+The public API should remain compatible with the existing frontend.
+
+==================================================
+11. FILE STORAGE
+================
+
+Automatically create required directories.
+
+For example, depending on the existing architecture:
+
+```text
+data/
+uploads/
+results/
+logs/
+models/
+```
+
+Use the actual existing structure where possible.
+
+Do not expose internal filesystem paths through API responses.
+
+Uploaded filenames must be safely handled.
+
+Do not allow users to submit arbitrary filesystem paths.
+
+Generated GLBs should be downloadable through controlled HTTP routes.
+
+==================================================
+12. PUBLIC PAGE
+===============
+
+Preserve the current public Image → 3D page.
+
+It should provide:
+
+### 2.1 · Single View
+
+* Main image
+* Object name
+* Description
+* Existing settings
+
+### 2mv · Multi View
+
+* Front — required
+* Back — optional
+* Left — optional
+* Right — optional
+* Object name
+* Description
+* Existing settings
+
+Do not break the current working UI.
+
+==================================================
+13. DESCRIPTION AND METADATA
+============================
+
+Preserve the existing behavior:
+
+* object name
+* description
+
+are embedded as GLB extras metadata where currently implemented.
+
+Object name should continue to influence the download filename.
+
+Do not claim that description is native Hunyuan text conditioning unless the actual model pipeline consumes it.
+
+==================================================
+14. MODEL SELECTOR
+==================
+
+Preserve:
+
+```text
+2.1 · Single View
+2mv · Multi View
+```
+
+Behavior:
+
+```text
+2.1
+ ↓
+existing Hunyuan3D-2.1 pipeline
+```
+
+and:
+
+```text
+2mv
+ ↓
+existing Hunyuan3D-2mv adapter
+```
+
+Do not silently route 2mv requests through 2.1.
+
+==================================================
+15. FIRST-RUN VALIDATION
+========================
+
+After setup, perform lightweight validation:
+
+* Python imports
+* FastAPI imports
+* Uvicorn availability
+* CUDA availability
+* Hunyuan dependencies
+* model checkpoint presence
+* 2.1 adapter import
+* 2mv adapter import
+* required directories
+* configuration
+
+Do NOT automatically perform expensive full 3D generation during normal setup.
+
+==================================================
+16. END-TO-END TEST SCRIPT
+==========================
+
+Create:
+
+```bash
+./test_generation.sh
+```
+
+It should test:
+
+### Test A — 2.1
+
+Main image only.
+
+Verify:
+
+* request accepted
+* job created
+* generation succeeds
+* GLB exists
+* GLB is valid
+* result endpoint works
+
+Report:
+
+```text
+2.1
+PASS
+Generation time: ...
+Faces: ...
+File size: ...
+```
+
+### Test B — 2mv
+
+Front + Back + Left + Right.
+
+Verify:
+
+* request accepted
+* job created
+* 2mv adapter used
+* generation succeeds
+* GLB exists
+* GLB is valid
+* result endpoint works
+
+Report:
+
+```text
+2mv
+PASS
+Generation time: ...
+Faces: ...
+File size: ...
+```
+
+Do not make setup.sh run these expensive generation tests automatically.
+
+==================================================
+17. DOCKER — OPTIONAL
+=====================
+
+Investigate whether Docker would genuinely improve reproducibility.
+
+If useful, create a GPU-compatible Docker setup.
+
+However:
+
+Do NOT force Docker if native installation is substantially more reliable for the Hunyuan3D environment.
+
+The primary requirement is:
+
+```bash
+./setup.sh
+```
+
+not Docker itself.
+
+==================================================
+18. SECURITY
+============
+
+Review the FastAPI application for obvious deployment problems.
+
+Ensure:
+
+* secrets are not committed
+* uploaded filenames are sanitized
+* arbitrary filesystem access is impossible
+* upload limits are enforced
+* invalid files are rejected
+* invalid model values return 400
+* private paths are not exposed
+* debug mode is configurable
+* CORS is not unnecessarily open
+* allowed hosts/origins are configurable if needed
+* generated files are served safely
+
+Do not add authentication unless the existing application requires it.
+
+==================================================
+19. LOGGING
+===========
+
+Keep useful logs for:
+
+* startup
+* GPU detection
+* model loading
+* job ID
+* selected model
+* generation start
+* generation completion
+* generation duration
+* generation failure
+
+Do not log:
+
+* secrets
+* API keys
+* private credentials
+
+==================================================
+20. GIT REPOSITORY CLEANUP
+==========================
+
+Review the repository before finalizing.
+
+Git must NOT contain:
+
+```text
+.venv/
+__pycache__/
+*.pyc
+uploaded images
+generated GLBs
+logs
+.env
+model checkpoints
+temporary files
+machine-specific paths
+```
+
+Update `.gitignore`.
+
+Do not commit multi-GB model files.
+
+==================================================
+21. README
+==========
+
+Create/update README.md.
+
+A completely new developer should be able to understand:
+
+1. What the application does.
+2. Supported GPU requirements.
+3. Required Python version.
+4. One-command setup.
+5. How model checkpoints are obtained.
+6. Hugging Face authentication requirements, if any.
+7. How to start the server.
+8. Public page URL.
+9. FastAPI docs URL.
+10. Health endpoint.
+11. API endpoints.
+12. 2.1 vs 2mv behavior.
+13. Environment variables.
+14. Test commands.
+15. Troubleshooting.
+16. Model/checkpoint licenses and access requirements.
+
+The normal workflow should be extremely short:
+
+```bash
+git clone <repo>
+cd <repo>
+./setup.sh
+```
+
+==================================================
+22. FRESH-CLONE TEST
+====================
+
+This is the most important verification.
+
+Do NOT only test the current already-configured machine.
+
+Use a clean environment or otherwise simulate a fresh clone.
+
+The equivalent workflow must work:
+
+```bash
+git clone <repo>
+cd <repo>
+./setup.sh
+```
+
+Then verify:
+
+* setup completes
+* FastAPI starts
+* `/` returns HTTP 200
+* `/health` returns healthy/ready
+* API docs are accessible
+* 2.1 model is available
+* 2mv model is available
+* upload endpoint works
+* 2.1 generation works
+* 2mv generation works
+* GLB result is produced
+* GLB download works
+
+Fix issues discovered during this fresh-clone test.
+
+==================================================
+23. NO MANUAL COMMAND CHAIN
+===========================
+
+The final README must NOT require a new developer to manually perform a long sequence such as:
+
+```bash
+python -m venv ...
+source ...
+pip install ...
+download checkpoint ...
+export ...
+python ...
+uvicorn ...
+```
+
+All normal setup should be handled by:
+
+```bash
+./setup.sh
+```
+
+The setup script should print clear progress:
+
+```text
+[1/8] Checking GPU ............... OK
+[2/8] Checking Python ............ OK
+[3/8] Creating environment ...... OK
+[4/8] Installing dependencies ... OK
+[5/8] Checking models ............ OK
+[6/8] Preparing application ...... OK
+[7/8] Running health checks ...... OK
+[8/8] Starting server ............ OK
+
+========================================
+SETUP COMPLETE
+========================================
+Public: http://...
+API Docs: http://.../docs
+Health: http://.../health
+========================================
+```
+
+==================================================
+24. FINAL DELIVERABLE
+
+After implementation, report:
+
+* Files created
+* Files modified
+* Exact setup command
+* Exact start command, if separate
+* Exact test command
+* Supported GPU requirements
+* Python version
+* PyTorch/CUDA versions
+* 2.1 checkpoint requirements
+* 2mv checkpoint requirements
+* Approximate total model download size
+* Whether Hugging Face login/token is required
+* Fresh-clone test result
+* 2.1 generation test result
+* 2mv generation test result
+* Any remaining manual step
+
+MOST IMPORTANT:
+
+This is a FastAPI project.
+
+Do NOT migrate to Django.
+
+The final goal is:
+
+```text
+git clone
+    ↓
+./setup.sh
+    ↓
+GPU + Python + dependencies + models + configuration
+    ↓
+FastAPI application
+    ↓
+Public Image → 3D page
+    ↓
+2.1 / 2mv
+    ↓
+GLB
+```
+
+A developer who has never seen this project should be able to clone it and get the complete working Image → 3D application with minimal intervention.
+
+Do not break the currently working Hunyuan3D-2.1 or Hunyuan3D-2mv pipelines while making the project reproducible.

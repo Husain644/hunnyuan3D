@@ -1,207 +1,134 @@
-# Session in  Opencode ->>> opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+# Hunyuan3D 2.1 / 2mv — Image→3D GLB API
 
-  █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
-  █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
-  ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+FastAPI service that turns an image (or four multi-view images) into a
+**3D `.glb` model** using Hunyuan3D 2.1 (single-view) and Hunyuan3D 2mv
+(multi-view). Async job queue, CPU-offload GPU management, tunable for a
+14.6 GB T4, verified end-to-end on T4 16 GB and RTX 2080 Ti.
 
-  Session   Async Python API for Hunyuan3D 2.1 GLB Export on …
-  Continue  opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+```
+image(s) → shape DiT → mesh decode → GLB (with name/description metadata)
+```
 
-# How to convert an image to a 3D .glb model (quick start for next time)
+## One-command setup
 
-## Overview
-
-Image → 3D GLB conversion runs on a **Lightning.ai Tesla T4 CloudSpace** via an
-async FastAPI server. Input images and output GLBs are kept **in memory** — no
-disk persistence on the remote. Everything below is done from your local Windows
-machine.
-
-> Deploying this elsewhere (any GPU box: Vast.ai, Colab, bare metal, Docker)?
-> See **[deploy.md](deploy.md)** — it documents two verified setups (Lightning
-> T4 and Vast.ai RTX 2080 Ti) plus the two API modes (disk vs RAM-only).
-
-## Step 1 — Start opencode in this project
+Requires a machine with an **NVIDIA GPU (≥ 12 GB VRAM, CUDA capable)** and
+Python **3.10–3.12**. No NVIDIA drivers are ever auto-installed.
 
 ```bash
-# from E:\AI (or anywhere)
-opencode
-# or resume this exact session if you need the history:
-opencode -s ses_f5b1b30a1ffeQkkEHTab5xXaPb
+git clone git@github.com:Husain644/hunnyuan3D.git hunyuan3d-api
+cd hunyuan3d-api
+
+./setup.sh            # detect GPU → venv → deps → clone model source → download weights → validate
+# optional:
+./setup.sh --start    # also start the server when setup finishes
 ```
 
-## Step 2 — Make sure the remote server is running
+`setup.sh` is **idempotent** — safe to re-run; it never re-downloads valid
+checkpoints and never destroys your `.env`, `outputs/`, or existing venv.
 
-The CloudSpace sleeps when idle, so the server may be down. Restart it:
+### What setup.sh does
+
+1. Detects your GPU (name, VRAM, driver, CUDA compat) and **aborts** with a
+   clear message if no compatible card is found (`--force` bypasses, at your
+   own risk).
+2. Creates `.venv/` and installs pinned deps (`requirements-gpu.txt` →
+   CUDA torch).
+3. Clones `Tencent-Hunyuan/Hunyuan3D-2.1` into `vendor/` (the reference
+   `hy3dshape`/`hy3dpaint` binding source).
+4. Verifies / downloads the **2.1** and **2mv** checkpoints into `models/`
+   (see [MODELS.md](MODELS.md) for the exact layout). Public weights, no HF
+   auth.
+5. Generates `.env` from `.env.example` (never overwrites an existing one),
+   creates `outputs/`, and runs a lightweight first-run validation.
+
+### Run
 
 ```bash
-ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=15 \
-  ssh s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
-  "cd ~/hunyuan3d-api && (nohup ./.venv/bin/python -m app.server > ./outputs/server.log 2>&1 &) && sleep 8 && curl -s http://127.0.0.1:8080/health | head -c 120"
+./run.sh                                      # or: ./setup.sh --start
+# → http://HOST:8080/   (public page)   /docs  (OpenAPI)
 ```
 
-Expected: `{"status":"ok","gpu_name":"Tesla T4",...}`. If the SSH key is rejected,
-just retry — the CloudSpace may have just restarted.
-
-## Step 3 — Upload an image and get the job id
-
-Plain `curl` from your machine against the public URL:
+### Test
 
 ```bash
-curl -X POST "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/generate/upload" \
-  -F "file=@E:\AI\image_for_glb\arm.jpg" -F "enable_texture=false"
+./test_generation.sh                          # Test A: 2.1, Test B: 2mv
 ```
 
-Returns `{"job_id":"...","status":"queued",...}`. Note the `job_id`.
-
-## Step 4 — Poll until finished (~6–7 min for shape-only)
-
-```bash
-curl -s "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/jobs/<job_id>"
-```
-
-`"status":"succeeded","progress":1.0` means it's done. `failed` → check `error`.
-
-## Step 5 — Download the GLB to your local output folder
-
-```bash
-curl -o "E:\AI\glb-output\<name>.glb" \
-  "https://8080-01m2n3gj3pwc5ga8pfj38nkq1r.cloudspaces.litng.ai/v1/public/jobs/<job_id>/result"
-```
-
-The GLB is served once and then purged from the remote's RAM.
-
-## One-command version (steps 3–5)
-
-```bash
-ssh -o StrictHostKeyChecking=no s_01m2n3gj3pwc5ga8pfj38nkq1r@ssh.lightning.ai \
-  "scp 'E:\AI\image_for_glb\xx.jpg'"  # or upload via curl to localhost then pull the file
-```
-
-## Common gotchas
-
-- **Browser upload error "Unexpected non-whitespace character after JSON"** =
-  the server was down (CloudSpace slept). Restart it (Step 2) and retry.
-- Only **1 job at a time** (`HY3D_MAX_ACTIVE_JOBS=1`); extra uploads wait in the queue.
-- `enable_texture=false` = shape-only, ~10 GB, fits the 14.6 GB T4. Texture mode
-  needs 21 GB and is disabled on this CloudSpace.
-- Job GLBs live in RAM only — if the server restarts mid-job, the job is lost
-  and you must re-upload.
-
-
-# Hunyuan3D 2.1 Async API
-
-FastAPI service that takes an input image, runs Hunyuan3D 2.1's image-to-3D
-pipeline (shape DiT → PBR texture), exports **GLB**, stores it on disk, and
-exposes **async job status** — tuned to run on a 14.6 GB T4.
-
-## Why this fits a T4
-
-Hunyuan3D 2.1's weights are ~10 GB (DiT) + ~21 GB (Paint / texture). A 14.6 GB
-T4 cannot hold both, so the pipeline serializes them:
-
-```text
-──── preprocess ──── shape (DiT) ──── offload to CPU ──── texture (Paint) ──── GLB
-                     ↑ load 10 GB ↑                          ↑ load ~11 GB ↑
-```
-
-Each stage is loaded under a GPU budget lock, runs, then is force-moved back to
-CPU (`module.to("cpu")` + `torch.cuda.empty_cache()`) before the next loads.
-`enable_model_cpu_offload()` (accelerate hooks) is additionally applied when the
-upstream bindings offer it, so intra-stage spill is handled by the framework.
+Generates synthetic inputs, submits them, polls to completion, and validates
+the resulting GLBs (watertight, non-empty) with trimesh.
 
 ## Endpoints
 
+Public (RAM-only, serve-once) API — what the web page uses:
+
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/generate` | Submit a job (multipart file, base64 form field, or JSON body). Returns `202` + `{job_id}`. |
-| `GET` | `/v1/jobs/{id}` | Job status: `status`, `progress`, `stage`, `error`, `result_url`. |
-| `GET` | `/v1/jobs/{id}/result` | Download the GLB (`model/gltf-binary`). |
-| `GET` | `/v1/jobs/{id}/thumbnail` | PNG thumbnail render (pyrender if installed). |
+| `POST` | `/v1/public/generate/upload` | Multipart submit. `model=2.1` (file) or `model=2mv` (view_front/back/left/right). `name`/`description` → embedded GLB metadata. |
+| `GET` | `/v1/public/jobs/{id}` | Job status: `status`, `progress`, `stage`, `error`. |
+| `GET` | `/v1/public/jobs/{id}/result` | Download GLB (served once, then purged from RAM). |
+| `GET` | `/health` | GPU info, active jobs, queue depth. |
+| `GET` | `/health/models` | Checkpoint availability per model. |
+
+Disk-persisted API (survives restarts):
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/generate` | JSON base64 or multipart submit (2.1). Returns `202` + `{job_id}`. |
+| `POST` | `/v1/generate/upload` | Multipart submit (2.1). |
+| `GET` | `/v1/jobs/{id}` | Job status. |
+| `GET` | `/v1/jobs/{id}/result` | Download GLB. |
+| `GET` | `/v1/jobs/{id}/thumbnail` | PNG preview (needs pyrender). |
 | `GET` | `/v1/jobs` | List recent jobs. |
-| `POST` | `/v1/jobs/{id}/cancel` | Cancel a queued job. |
-| `GET` | `/health` | GPU name, VRAM, active jobs, queue depth. |
+| `POST` | `/v1/jobs/{id}/cancel` | Cancel queued job. |
 
-Full OpenAPI docs at `/docs`.
+Full OpenAPI docs at `/docs` once running.
 
-## Quick start
-
-```bash
-# 1. Install Python deps
-pip install -r requirements.txt
-
-# 2. Clone + build Hunyuan3D 2.1 (reference repo layout must sit beside this
-#    service so `hy3dshape`/`hy3dpaint` are importable, or set PYTHONPATH).
-git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git
-cd Hunyuan3D-2.1/hy3dpaint/custom_rasterizer && python setup.py install
-cd ../..
-
-# 3. Copy env config and run
-cp .env.example .env
-python -m app.server            # or: bash run.sh
-```
-
-Weights download from HuggingFace on first job from the unified repo
-`tencent/Hunyuan3D-2.1` (shape DiT + texture paint).
-
-### Submit a job
+### Example
 
 ```bash
-# file upload
-curl -X POST http://localhost:8080/v1/generate \
-  -F "file=@chair.png" -F "enable_texture=true"
+# 2.1 single view
+curl -X POST http://localhost:8080/v1/public/generate/upload \
+  -F "model=2.1" -F "name=my chair" -F "file=@chair.png"
+# → {"job_id":"...","status":"queued",...}
 
-# base64
-curl -X POST http://localhost:8080/v1/generate \
-  -H "Content-Type: application/json" \
-  -d '{"image":"<base64>","octree_resolution":256}'
+# 2mv multi view
+curl -X POST http://localhost:8080/v1/public/generate/upload \
+  -F "model=2mv" -F "view_front=@f.png" -F "view_back=@b.png" \
+  -F "view_left=@l.png" -F "view_right=@r.png" -F "name=character"
+
+# poll, then download
+curl -s http://localhost:8080/v1/public/jobs/<job_id>
+curl -o out.glb http://localhost:8080/v1/public/jobs/<job_id>/result
 ```
 
-### Poll
+## Configuration (`.env`)
 
-```bash
-curl -s http://localhost:8080/v1/jobs/<job_id>
-# {"status":"running","stage":"texture","progress":0.8,...}
-
-curl -sL http://localhost:8080/v1/jobs/<job_id>/result -o out.glb
-```
-
-## Memory / throughput knobs (`.env`)
+Created from `.env.example` on first setup. Key variables:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `HY3D_ENABLE_TEXTURE` | `1` | `0` → shape-only, ~10 GB peak, ~3× faster |
-| `HY3D_STEPS` | `30` | `5` if using the Turbo checkpoint |
-| `HY3D_OCTREE` | `256` | lower = smaller mesh, less decode VRAM |
-| `HY3D_VAE_CHUNKS` | `8000` | lower = less peak VRAM during VAE decode |
-| `HY3D_TEX_RES` / `HY3D_TEX_VIEWS` | `512` / `6` | texture quality vs. time |
-| `HY3D_MAX_ACTIVE_JOBS` | `1` | keep `1` (shape stage is not reentrant) |
-| `HY3D_VRAM_GB_*` | per-stage | VRAM budgets used by the guard rails |
+| `HY3D_ENABLE_TEXTURE` / `HY3D_ENABLE_REMBG` | `0` | opt-in heavy stages (texture needs ≥ 21 GB + rasterizer build) |
+| `HY3D_STEPS` / `HY3D_GUIDANCE` | `30` / `5.0` | shape diffusion settings |
+| `HY3D_OCTREE` | `256` | mesh resolution (128–384) |
+| `HY3D_VAE_CHUNKS` | `8000` | lower = less peak VRAM in VAE decode |
+| `HY3D_MAX_ACTIVE_JOBS` | `1` | keep 1 (shape stage is not reentrant) |
+| `HY3D_MAX_UPLOAD_MB` | `20` | public upload size cap (413 over limit) |
+| `HY3D_CORS_ORIGINS` | `*` | comma-separated allowed origins |
+| `HY3DGEN_MODELS` | `models` | checkpoint cache dir (`setup.sh` sets absolute path) |
+| `HY3D_REPO_DIR` | `vendor/Hunyuan3D-2.1` | model source dir (`setup.sh` sets absolute path) |
 
-## Notes
+## Documentation
 
-- The worker executes the blocking CUDA work in a background thread (`asyncio.to_thread`);
-  HTTP requests stay responsive during a run.
-- Job metadata + GLB are persisted under `outputs/` (configurable) and survive restarts.
-- v2.0 (`hy3dgen` package) is auto-detected as a fallback if the 2.1 bindings
-  aren't installed; the same API and offloading strategy apply.
+* **[MODELS.md](MODELS.md)** — both checkpoints, exact cache layout, download/verify.
+* **[deploy.md](deploy.md)** — two verified deployments (Lightning T4, Vast.ai 2080 Ti) + both API modes.
+* `implement.txt` — the reproducibility spec this setup implements.
 
 ## Google Colab (T4)
 
-One-click Colab setup defaults to shape-only (~10 GB peak, fits 14.6 GB T4).
-Texture is off by default (paint model needs 21 GB, doesn't fit T4).
+The Colab path predates the one-command setup and is kept for reference:
+`scripts/colab_setup.sh` + `scripts/colab_run.sh` + `scripts/colab_test.py`.
 
-```python
-# Run inside a Colab cell (OR clone + run the scripts)
-!git clone https://github.com/you/hunyuan3d-api /content/hunyuan3d-api
-!bash /content/hunyuan3d-api/scripts/colab_setup.sh
-!bash /content/hunyuan3d-api/scripts/colab_run.sh &
-!sleep 3 && python /content/hunyuan3d-api/scripts/colab_test.py
-```
-
-The test script spins up the server (if down), hits `/health`, posts a test
-image, polls the job to completion, and validates the GLB with trimesh.
-
-## Docker
+## Docker (optional)
 
 ```bash
 docker build -t hunyuan3d-api .
@@ -209,4 +136,10 @@ docker run --gpus '"device=0"' -p 8080:8080 \
   -v "$(pwd)/outputs:/data" hunyuan3d-api
 ```
 
-The image clones Hunyuan3D-2.1 and compiles its custom rasterizer during build.
+## Notes
+
+- Worker executes blocking CUDA work in a background thread; HTTP stays responsive.
+- Jobs never run concurrently on the GPU (`_GPU_LOCK` + `HY3D_MAX_ACTIVE_JOBS=1`).
+- Only the selected model is loaded into VRAM (never both at once).
+- `models/`, `vendor/`, `.venv/`, `outputs/`, `.env` are gitignored and
+  generated on the machine — nothing machine-specific is committed.
