@@ -211,11 +211,20 @@ export HY3D_ENABLE_REMBG="${HY3D_ENABLE_REMBG:-0}"
 
 # Write machine-specific paths into .env so run.sh (which sources .env) works
 # from any shell. Idempotent: existing values are never overwritten.
-_inject_env() {  # _inject_env KEY VALUE
+_inject_env() {  # _inject_env KEY VALUE  (append; never overwrite)
   local k="$1" v="$2"
   if ! grep -q "^${k}=" .env; then
     printf '\n%s=%s\n' "$k" "$v" >> .env
     echo "  added $k to .env"
+  fi
+}
+_set_env() {  # _set_env KEY VALUE  (replace existing value or append)
+  local k="$1" v="$2"
+  if grep -q "^${k}=" .env; then
+    sed -i "s|^${k}=.*|${k}=${v}|" .env
+    echo "  updated $k in .env"
+  else
+    _inject_env "$k" "$v"
   fi
 }
 _inject_env "HY3D_REPO_DIR" "$HY3D_REPO_DIR"
@@ -226,6 +235,23 @@ _inject_env "HY3D_ENABLE_REMBG" "$HY3D_ENABLE_REMBG"
 # required dirs
 mkdir -p outputs/glb outputs/jobs logs models
 echo "  directories ready (outputs/, logs/, models/)"
+
+# If the configured HTTP port is already taken (e.g. Jupyter sits on 8080 on
+# Vast.ai instances) pick the next free port and record it in .env (updates
+# the value in .env, whether default or user-set — the port must be free to
+# run.sh successfully).
+_port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+CFG_PORT="$(grep -E '^HY3D_PORT=' .env | tail -1 | cut -d= -f2 || echo 8080)"
+CFG_PORT="${CFG_PORT:-8080}"
+if ! _port_free "$CFG_PORT"; then
+  NEW_PORT="$CFG_PORT"
+  while [ "$NEW_PORT" -lt 60000 ]; do
+    NEW_PORT=$((NEW_PORT + 1))
+    if _port_free "$NEW_PORT"; then break; fi
+  done
+  _set_env "HY3D_PORT" "$NEW_PORT"
+  echo "  port $CFG_PORT busy — using $NEW_PORT instead"
+fi
 
 # validate imports / adapters / CUDA / checkpoints (lightweight, no generation)
 info "First-run validation (no 3D generation)"
