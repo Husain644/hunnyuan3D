@@ -463,36 +463,53 @@
   setInterval(tickStats,3000);
   tickStats();
 
+  let worker = null;
   async function pump(){
-    if(generating) return;
-    const todo = queue.filter(q=>q.status==='todo');
-    if(!todo.length){ generating=true; renderQueue(); log('All done — '+
-      queue.filter(q=>q.status==='ok').length+' model(s) ready','ok'); generating=false; renderQueue(); return; }
+    // join an active worker instead of silently dropping newly queued items
+    if(worker) return worker;
+    worker = runWorker();
+    try{ await worker; } finally { worker = null; }
+  }
+
+  const terminal = s=>['ok','fail','cancelled','paused'].includes(s);
+  async function runWorker(){
     generating=true;
-    const done=[];
-    log(`submitting ${todo.length} job(s) — server auto-scales to free VRAM`,'busy');
-    for(const item of todo){
-      item.status='wait'; renderQueue();
-      try{ item.jobId = await submitItem(item); done.push(item); }
-      catch(e){ item.status='fail'; item.err=e.message.slice(0,120);
-        log(`FAILED ${labelOf(item)}: ${e.message}`,'wait'); }
-    }
-    renderQueue();
-    while(done.length){
-      await new Promise(r=>setTimeout(r,4000));
-      let finished=0, active=0;
-      for(const item of done){
-        if(['ok','fail','cancelled','paused'].includes(item.status)){ finished++; continue; }
-        active++;
-        await tickJob(item);
-        if(['ok','fail','cancelled','paused'].includes(item.status)) finished++;
+    try{
+      for(;;){
+        // submit everything currently waiting
+        const todo = queue.filter(q=>q.status==='todo');
+        for(const item of todo){
+          if(terminal(item.status)) continue;
+          item.status='wait'; renderQueue();
+          try{
+            item.jobId = await submitItem(item);
+          }catch(e){
+            item.status='fail'; item.err=e.message.slice(0,120);
+            log(`FAILED ${labelOf(item)}: ${e.message}`,'wait');
+          }
+        }
+        // poll every in-flight job (any item with a live server job)
+        const inflight = queue.filter(q=>q.jobId && !terminal(q.status));
+        if(inflight.length){
+          await new Promise(r=>setTimeout(r,4000));
+          for(const item of inflight) await tickJob(item);
+          renderQueue();
+          continue;   // loop again: grab new todo items + keep polling
+        }
+        // nothing running and nothing queued → we're done
+        if(!queue.some(q=>q.status==='todo')){
+          renderQueue();
+          const okN=queue.filter(q=>q.status==='ok').length;
+          if(queue.length && queue.every(q=>q.status==='ok')) log('All done — '+okN+' model(s) ready','ok');
+          break;
+        }
+        // todo items exist but nothing submitted yet this pass → retry submit
       }
+    } finally {
+      generating=false;
+      if($('goBtn')) $('goBtn').disabled = !queue.length;
       renderQueue();
-      if(finished===done.length||active===0) break;
     }
-    generating=false;
-    renderQueue();
-    if(queue.every(q=>q.status==='ok')) log('All done — '+queue.length+' model(s) ready','ok');
   }
 
   async function submitItem(item){
@@ -521,6 +538,7 @@
   }
 
   async function tickJob(item){
+    if(!item.jobId) return;    // not submitted (yet) — never poll /null
     const stageName=s=>({preprocess:'preprocess',shape:'shape diffusion (GPU)',
       texture:'texture (GPU)',export:'exporting GLB',done:'done',running:'running'}[s]||s||'working');
     try{
