@@ -116,6 +116,13 @@ class JobManager:
         job.set_status(JobStatus.RUNNING, message="shape stage starting")
         try:
             result = await self.run_fn(job.job_id, job.payload)
+            if job.cancelled.is_set():
+                # cancelled (or paused) while the blocking stage ran: drop the
+                # result, mark cancelled, and forget the job so it can't linger.
+                job.set_status(JobStatus.CANCELLED, message="cancelled")
+                self.storage.save_meta(job.job_id, job.snapshot())
+                self.forget(job.job_id)
+                return
             job.set_status(
                 JobStatus.SUCCEEDED,
                 stage="done",

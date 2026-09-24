@@ -410,6 +410,31 @@ async def public_job_result(job_id: str) -> Response:
     )
 
 
+@app.post("/v1/public/jobs/{job_id}/cancel")
+async def public_job_cancel(job_id: str) -> JobOut:
+    job = PUBLIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="public job not found")
+    PUBLIC_JOBS.cancel(job_id)
+    return JobOut(**job.snapshot())
+
+
+@app.delete("/v1/public/jobs/{job_id}")
+async def public_job_delete(job_id: str) -> JSONResponse:
+    job = PUBLIC_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="public job not found")
+    status = job.state.get("status")
+    deferred = status == "running"
+    if deferred:
+        PUBLIC_JOBS.cancel(job_id)          # _run marks CANCELLED + forgets
+    else:
+        if status == "queued":
+            PUBLIC_JOBS.cancel(job_id)
+        PUBLIC_JOBS.forget(job_id)
+    return JSONResponse({"ok": True, "deferred": deferred})
+
+
 def _download_name(job: Any) -> str:
     """Sanitise the user-supplied object name down to a safe filename token."""
     try:

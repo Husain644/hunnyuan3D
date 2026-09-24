@@ -117,6 +117,20 @@
     font-size:11px;font-weight:700;cursor:pointer;flex:none}
   .view:disabled{opacity:.35;cursor:default}
 
+  .qitem img{cursor:pointer}
+  .iact{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
+  .iact button{background:var(--panel);border:1px solid var(--line);border-radius:7px;color:var(--muted);
+    font-size:11px;line-height:1;padding:5px 7px;cursor:pointer;transition:.12s}
+  .iact button:hover{color:#fff;border-color:var(--accent);background:#1d2840}
+  .iact button.a-on{color:var(--accent);border-color:var(--accent)}
+  .qlabel{display:flex;align-items:center;gap:6px}
+  .qlabel .qbadge{font-size:10px;color:var(--warn);border:1px solid var(--warn);border-radius:999px;padding:1px 6px;flex:none}
+  .dlbar{display:flex;gap:10px;margin-top:12px;align-items:center}
+  .dlbar button{background:linear-gradient(135deg,#2f9c6b,var(--accent2));color:#fff;border:none;border-radius:10px;
+    padding:9px 12px;font-size:12px;font-weight:700;cursor:pointer}
+  .dlbar button:disabled{opacity:.4;cursor:not-allowed}
+  .dlbar .cnt{font-size:11px;color:var(--muted);flex:1}
+
   #errBox{display:none;margin-top:14px;padding:12px;border:1px solid var(--err);border-radius:10px;
     background:#2a1518;color:var(--err);font-size:13px;white-space:pre-wrap}
 
@@ -229,6 +243,10 @@
 
     <div class="card">
       <h2>2 · Result</h2>
+      <div class="dlbar">
+        <button id="dlAllBtn" disabled onclick="downloadAll()">⬇ Download all (0)</button>
+        <span class="cnt" id="zipCnt">ZIP all finished GLBs together</span>
+      </div>
       <div id="result">
         <model-viewer id="viewer" camera-controls auto-rotate shadow-intensity="1"
           alt="Generated 3D model"></model-viewer>
@@ -261,6 +279,7 @@
 </div>
 
 <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+<script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
 <script>
   const $ = id => document.getElementById(id);
   const drop=$('drop'), input=$('fileInput');
@@ -375,29 +394,48 @@
   }
   function renderQueue(){
     const box=$('queueBox');
-    if(!queue.length){ box.style.display='none'; $('qmeta').textContent=''; return; }
+    if(!queue.length){ box.style.display='none'; $('qmeta').textContent=''; $('dlAllBtn').disabled=true; return; }
     box.style.display='block';
+    const chipmap={todo:'waiting',wait:'queued',pausing:'pausing…',doing:'running…',paused:'paused',cancelled:'cancelled',ok:'done ✓',fail:'failed'};
+    const clsmap={todo:'todo',wait:'wait',pausing:'doing',doing:'doing',paused:'wait',cancelled:'fail',ok:'ok',fail:'fail'};
     let html='';
     queue.forEach((q,i)=>{
-      const chip={todo:'waiting',wait:'queued',doing:'running…',ok:'done ✓',fail:'failed'}[q.status];
-      const cls={todo:'todo',wait:'wait',doing:'doing',ok:'ok',fail:'fail'}[q.status];
-      const sub = q.status==='doing' ? (q.stage||'working')
+      const chip=chipmap[q.status]||q.status;
+      const cls=clsmap[q.status]||'todo';
+      const sub = q.status==='doing'||q.status==='wait' ? (q.stage||'working')
+                : q.status==='pausing' ? 'stopping GPU job…'
+                : q.status==='paused' ? 'paused'
+                : q.status==='cancelled' ? (q.err||'cancelled')
                 : q.status==='ok' ? (q.jobId?q.jobId.slice(0,8):'')
                 : q.status==='fail' ? (q.err||'error')
+                : q.status==='todo' ? (q.lastDone?'queued to re-generate':'lined up')
                 : 'lined up';
-      const pct = q.status==='doing' ? Math.round((q.progress||0)*100) : (q.status==='ok'?100:0);
+      const pct = (q.status==='doing'||q.status==='wait'||q.status==='pausing') ? Math.round((q.progress||0)*100) : (q.status==='ok'?100:0);
       html+=`<div class="qitem ${q===current?'sel':''}" data-i="${i}">
-        <img src="${thumbOf(q)}" alt=""/>
-        <div class="qi-name">${escapeHtml(labelOf(q))}<small>${sub}${q.el? ' · '+q.el+'m':''}</small></div>
-        <div class="qi-state"><span class="chip ${cls}">${chip}</span>
-          ${q.status==='doing'?`<div class="qbar"><i style="width:${pct}%"></i></div>`:''}
+        <img src="${thumbOf(q)}" alt="change image" title="Click to change this image"/>
+        <div class="qi-name">
+          <span class="qlabel">${escapeHtml(labelOf(q))}${q.imgChanged?'<span class="qbadge">new image</span>':''}</span>
+          <small>${sub}${q.el? ' · '+q.el+'m':''}</small>
+          <div class="iact">
+            <button data-act="pause" data-i="${i}" title="Pause (stop + hold for later)">⏸</button>
+            <button data-act="resume" data-i="${i}" title="Resume / generate">▶</button>
+            <button data-act="cancel" data-i="${i}" title="Cancel this job">✕</button>
+            <button data-act="regen" data-i="${i}" title="Regenerate with current image">↻</button>
+            <button data-act="download" data-i="${i}" title="Download this GLB">⬇</button>
+            <button data-act="delete" data-i="${i}" title="Remove from list">🗑</button>
+          </div>
         </div>
-        ${q.blobUrl?`<button class="view" data-view="${i}" title="Preview 3D">▶</button>`:''}
+        <div class="qi-state"><span class="chip ${cls}">${chip}</span>
+          ${(q.status==='doing'||q.status==='wait')?`<div class="qbar"><i style="width:${pct}%"></i></div>`:''}
+        </div>
+        ${q.blobUrl&&q.status==='ok'?`<button class="view" data-view="${i}" title="Preview 3D">▶</button>`:''}
       </div>`;
     });
     box.innerHTML=html;
-    const done=queue.filter(q=>q.status==='ok').length;
-    $('qmeta').textContent = `${done}/${queue.length} done ${generating?'· running':'· idle'}`;
+    const done=queue.filter(q=>q.status==='ok'&&q.blobUrl).length;
+    $('qmeta').textContent = `${done}/${queue.length} ready ${generating?'· running':'· idle'}`;
+    $('dlAllBtn').textContent = `⬇ Download all (${done})`;
+    $('dlAllBtn').disabled = done===0;
   }
   function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
@@ -442,14 +480,15 @@
     renderQueue();
     while(done.length){
       await new Promise(r=>setTimeout(r,4000));
-      let finished=0;
+      let finished=0, active=0;
       for(const item of done){
-        if(item.status==='ok'||item.status==='fail'){ finished++; continue; }
+        if(['ok','fail','cancelled','paused'].includes(item.status)){ finished++; continue; }
+        active++;
         await tickJob(item);
-        if(item.status==='ok'||item.status==='fail') finished++;
+        if(['ok','fail','cancelled','paused'].includes(item.status)) finished++;
       }
       renderQueue();
-      if(finished===done.length) break;
+      if(finished===done.length||active===0) break;
     }
     generating=false;
     renderQueue();
@@ -486,17 +525,28 @@
       texture:'texture (GPU)',export:'exporting GLB',done:'done',running:'running'}[s]||s||'working');
     try{
       const rr=await fetch('/v1/public/jobs/'+item.jobId);
+      if(rr.status===404){
+        // job purged/forgot — happens right after a user cancel (auto-forget).
+        if(item.pendingPause||item.status==='pausing'){ item.status='paused'; item.pendingPause=false; }
+        else if(item.status!=='ok'){ item.status='cancelled'; item.err='job was removed'; }
+        renderQueue(); return;
+      }
       const j=await rr.json();
       if(!rr.ok) throw new Error(j.error||j.detail||('HTTP '+rr.status));
       item.el=( (Date.now() - (item._t0||(item._t0=Date.now())))/60000 ).toFixed(1);
       item.progress=j.progress; item.stage=j.stage;
-      if(j.status==='running') item.status='doing';
-      if(j.status==='succeeded'){ item.progress=1; item.status='ok';
+      if(j.status==='running' && item.status!=='pausing') item.status='doing';
+      if(j.status==='succeeded'){ item.progress=1; item.status='ok'; item.lastDone=true;
         log(`DONE ${labelOf(item)}`,'ok'); renderQueue(); await grabResult(item); return; }
-      if(j.status==='failed'||j.status==='cancelled'){ item.status='fail';
+      if(j.status==='cancelled'){ item.progress=0;
+        if(item.pendingPause||item.status==='pausing'){ item.status='paused'; item.pendingPause=false; }
+        else if(item.status!=='ok'){ item.status='cancelled'; }
+        renderQueue(); return; }
+      if(j.status==='failed'){ item.status='fail';
         item.err=(j.error||j.status).slice(0,120);
         log(`FAILED ${labelOf(item)}: ${item.err}`,'wait'); return; }
     }catch(e){
+      if(item.pendingPause||item.status==='pausing'){ item.status='paused'; item.pendingPause=false; renderQueue(); return; }
       if(item.status!=='ok'){ item.status='fail'; item.err=(e.message||'error').slice(0,120);
         log(`FAILED ${labelOf(item)}: ${e.message}`,'wait'); }
     }
@@ -527,9 +577,136 @@
     renderQueue();
   }
 
+  /* ---------- per-item actions: pause/resume/cancel/regenerate/delete ---------- */
+  const actBusy = new WeakSet();
+  async function serverDelete(jobId){
+    try{ await fetch('/v1/public/jobs/'+jobId,{method:'DELETE'}); }catch(_){}
+  }
+  function clearResult(item){
+    if(item.blobUrl) URL.revokeObjectURL(item.blobUrl);
+    item.blobUrl=null; item.sizeMb=null; item.progress=0; item.stage=null; item.el=0;
+  }
+  function setLastGen(item){ item.lastDone = item.status==='ok'; }
+
+  async function actPause(item){
+    if(actBusy.has(item)) return;
+    if(item.status==='paused'){ item.status='todo'; renderQueue(); pump(); return; }   // unpause
+    if(item.status==='todo'){ item.status='paused'; renderQueue(); return; }
+    if((item.status==='wait'||item.status==='doing')&&item.jobId){
+      actBusy.add(item);
+      item.status='pausing'; item.pendingPause=true;
+      try{ await fetch('/v1/public/jobs/'+item.jobId+'/cancel',{method:'POST'}); }
+      catch(e){ log('pause failed: '+e.message,'wait'); item.status='doing'; item.pendingPause=false; }
+      renderQueue();
+      actBusy.delete(item);
+      return;
+    }
+    log('Nothing running to pause — use ↻ to regenerate when it finishes','wait');
+  }
+
+  async function actResume(item){
+    if(actBusy.has(item)) return;
+    if(item.status==='wait'||item.status==='doing'||item.status==='pausing'){
+      log('Already running — wait for it or pause it first','wait'); return;
+    }
+    if(item.jobId) await serverDelete(item.jobId);
+    item.jobId=null; item.status='todo'; item.pendingPause=false; clearResult(item);
+    renderQueue(); pump();
+  }
+
+  async function actCancel(item){
+    if(actBusy.has(item)) return;
+    if(item.status==='cancelled'){ log('Already cancelled — use ▶ to retry or 🗑 to remove','wait'); return; }
+    if(item.status==='wait'||item.status==='doing'){
+      actBusy.add(item);
+      try{ await fetch('/v1/public/jobs/'+item.jobId+'/cancel',{method:'POST'}); }
+      catch(e){ log('cancel failed: '+e.message,'wait'); }
+      item.pendingPause=false;
+      setLastGen(item);
+      actBusy.delete(item);
+    }
+    item.status='cancelled'; clearResult(item);
+    renderQueue();
+  }
+
+  async function actRegen(item){
+    if(actBusy.has(item)) return;
+    if(item.status==='wait'||item.status==='doing'||item.status==='pausing'){
+      log('Still running — pause it first to regenerate','wait'); return;
+    }
+    if(item.jobId) await serverDelete(item.jobId);
+    item.jobId=null; item.status='todo'; item.pendingPause=false; clearResult(item);
+    renderQueue(); pump();
+  }
+
+  async function actDelete(item){
+    if(actBusy.has(item)) return;
+    if(item.jobId) await serverDelete(item.jobId);
+    if(item.blobUrl) URL.revokeObjectURL(item.blobUrl);
+    const i=queue.indexOf(item);
+    if(i>-1) queue.splice(i,1);
+    if(current===item){ current=null; $('result').style.display='none'; }
+    log('Removed '+labelOf(item),'wait');
+    renderQueue();
+  }
+
+  async function actDownload(item){
+    if(item.blobUrl&&item.status==='ok'){
+      const a=document.createElement('a');
+      const base=(item.name||item.file?.name||'hunyuan3d').replace(/\.[^.]+$/,'')+'.glb';
+      a.href=item.blobUrl; a.download=base; document.body.appendChild(a); a.click(); a.remove();
+      return;
+    }
+    log('No finished GLB for this item yet','wait');
+  }
+
+  function changeImage(item){
+    if(item.status==='wait'||item.status==='doing'||item.status==='pausing'){
+      log('Pause or cancel this job before changing its image','wait'); return;
+    }
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='image/png,image/jpeg,image/webp,image/bmp';
+    inp.onchange=()=>{
+      const f=inp.files && inp.files[0]; if(!f) return;
+      const wasLast = item.lastDone;
+      if(item.type==='2.1'||item.file){ item.file=f; }
+      else { item.views={ front:f }; }   // multi-view: replace the driving front view
+      item.imgChanged=true; clearResult(item);
+      if(['ok','fail','paused','cancelled'].includes(item.status)){ item.status='todo'; }
+      log(`Image updated for ${labelOf(item)} → ready to generate${wasLast?' again':''}`,'wait');
+      if(item.status==='todo'){ renderQueue(); }
+    };
+    inp.click();
+  }
+
+  async function downloadAll(){
+    if(!window.JSZip){ log('ZIP library still loading — retry in a second','wait'); return; }
+    const ok=queue.filter(q=>q.status==='ok'&&q.blobUrl);
+    if(!ok.length){ showErr('No finished GLBs to download yet.'); return; }
+    const zip=new JSZip();
+    for(const q of ok){
+      try{
+        const blob=await fetch(q.blobUrl).then(r=>r.blob());
+        const base=(q.name||q.file?.name||('object_'+((q.jobId||'').slice(0,8)||'model'))).replace(/\.[^.]+$/,'');
+        zip.file(base+'.glb', blob);
+      }catch(_){ log('skipped a GLB that was already served','wait'); }
+    }
+    const out=await zip.generateAsync({type:'blob'});
+    const url=URL.createObjectURL(out);
+    const a=document.createElement('a'); a.href=url; a.download='hunyuan3d_batch_'+ok.length+'.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    log('ZIP with '+ok.length+' GLB(s) downloaded','ok');
+  }
+
   $('queueBox').addEventListener('click',e=>{
-    const btn=e.target.closest('[data-view]');
-    if(btn) showItem(queue[+btn.dataset.view]);
+    const actBtn=e.target.closest('button[data-act]');
+    const viewBtn=e.target.closest('[data-view]');
+    const img=e.target.closest('.qitem img');
+    if(actBtn){ const item=queue[+actBtn.dataset.i];
+      ({pause:actPause,resume:actResume,cancel:actCancel,regen:actRegen,
+        download:actDownload,delete:actDelete}[actBtn.dataset.act])(item); return; }
+    if(viewBtn){ showItem(queue[+viewBtn.dataset.view]); return; }
+    if(img){ changeImage(queue[+img.closest('.qitem').dataset.i]); }
   });
 
   function showErr(m){ $('errBox').textContent=m; $('errBox').style.display='block'; }
