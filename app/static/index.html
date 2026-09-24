@@ -103,6 +103,15 @@
   .texopt input{width:16px;height:16px;accent-color:#7c5cff;cursor:pointer}
   .texhint{color:var(--mut);font-size:11px}
 
+  .opts{margin:4px 0 14px}
+  .optrow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:12px;border:1px solid var(--line);
+    border-radius:12px;background:var(--panel2)}
+  @media(max-width:560px){.optrow{grid-template-columns:repeat(2,1fr)}}
+  .optrow label{font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+    display:flex;flex-direction:column;gap:5px}
+  .optrow select,.optrow input{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+    color:var(--text);padding:8px 10px;font-size:13px;font-family:inherit;text-transform:none;width:100%}
+
   .qitem.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
   .view{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:5px 10px;
     font-size:11px;font-weight:700;cursor:pointer;flex:none}
@@ -190,6 +199,29 @@
       <label class="texopt" title="Runs the texture/paint stage. Heavy: needs a single job slot and the compiled hy3dpaint rasterizer.">
         <input type="checkbox" id="texToggle"/> Color texture <span class="texhint">(2.1 only · slow · needs big VRAM)</span>
       </label>
+
+      <div class="opts" id="advOpts">
+        <div class="optrow">
+          <label>Texture resolution
+            <select id="texRes" title="Higher = sharper but slower + more VRAM (1024 may fail on 24 GB cards).">
+              <option value="512" selected>512 · recommended</option>
+              <option value="1024">1024 · HQ / slow</option>
+            </select>
+          </label>
+          <label>Shape steps (diffusion)
+            <input id="steps" type="number" min="5" max="100" step="1" value="30" title="Shape diffusion steps. 30 default; 5 if using a turbo checkpoint."/>
+          </label>
+          <label>Guidance scale
+            <input id="guidance" type="number" min="1" max="15" step="0.5" value="5.0" title="How closely the shape follows the input image."/>
+          </label>
+          <label>Octree resolution
+            <select id="octree" title="Spatial quantisation of the shape. 256 default; higher = finer detail.">
+              <option selected>256</option><option>320</option><option>384</option><option>512</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
       <button id="goBtn" disabled>Generate 3D models</button>
       <div class="queuemn" id="qmeta"></div>
       <div id="errBox"></div>
@@ -220,10 +252,11 @@
 
   <div class="note">
     API: <code>POST /v1/public/generate/upload</code> (multipart <code>file</code> for 2.1, or
-    <code>view_front/view_back/view_left/view_right</code> for 2mv, plus <code>model</code>, <code>name</code>, <code>description</code>, <code>enable_texture</code>) →
+    <code>view_front/view_back/view_left/view_right</code> for 2mv, plus <code>model</code>, <code>name</code>, <code>description</code>,
+    <code>enable_texture</code>, <code>tex_resolution</code>, <code>num_inference_steps</code>, <code>guidance_scale</code>, <code>octree_resolution</code>) →
     <code>GET /v1/public/jobs/{id}</code> (status) →
     <code>GET /v1/public/jobs/{id}/result</code> (GLB bytes, then purged).
-    The server auto-scales concurrency to free VRAM (current card: 2 shape slots; texture jobs run single-slot, ~3–8 min each).
+    The server auto-scales concurrency to free VRAM (current card: 2 shape slots; texture jobs run single-slot, ~2.5–6 min each).
   </div>
 </div>
 
@@ -432,6 +465,10 @@
       for(const tag of ['front','back','left','right']) if(item.views[tag]) fd.append('view_'+tag, item.views[tag]);
     } else {
       fd.append('file', item.file); fd.append('enable_texture', $('texToggle').checked ? 'true' : 'false');
+      fd.append('num_inference_steps', $('steps').value || '30');
+      fd.append('guidance_scale', $('guidance').value || '5.0');
+      fd.append('octree_resolution', $('octree').value || '256');
+      if($('texToggle').checked) fd.append('tex_resolution', $('texRes').value || '512');
     }
     const r=await fetch('/v1/public/generate/upload',{method:'POST',body:fd});
     let b; try{ b=await r.json(); }catch(_){
@@ -498,6 +535,12 @@
   function showErr(m){ $('errBox').textContent=m; $('errBox').style.display='block'; }
   function hideErr(){ $('errBox').style.display='none'; }
   $('againBtn').addEventListener('click',()=>{ location.reload(); });
+
+  /* texture options: resolution only applies while texture is on */
+  const texResSel=$('texRes');
+  function syncTexOpts(){ texResSel.toggleAttribute('disabled', !$('texToggle').checked); texResSel.style.opacity = $('texToggle').checked ? 1 : .45; }
+  $('texToggle').addEventListener('change', syncTexOpts);
+  syncTexOpts();
 </script>
 </body>
 </html>
