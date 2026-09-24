@@ -73,6 +73,31 @@ uv pip install --python "$PY" --index-url "$MIRROR" \
 BS="$VENV_DIR/lib/python3.11/site-packages/basicsr/data/degradations.py"
 sed -i "s/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/" "$BS"
 
+# 7b) vendor paint remesh: trimesh changed its simplify API ('percent'/'face_count'
+#     in new versions vs positional 'target_count' in old). Make vendored call
+#     compatible with both; otherwise fast_simplification raises
+#     ``target_reduction`` must be between 0 and 1 (40000 lands in percent).
+VEND_SIMPLIFY="vendor/Hunyuan3D-2.1/hy3dpaint/utils/simplify_mesh_utils.py"
+if [ -f "$VEND_SIMPLIFY" ]; then
+  "$PY" - "$VEND_SIMPLIFY" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = """    if face_num > target_count:
+        courent = courent.simplify_quadric_decimation(target_count)
+"""
+new = """    if face_num > target_count:
+        try:
+            courent = courent.simplify_quadric_decimation(face_count=target_count)
+        except TypeError:
+            courent = courent.simplify_quadric_decimation(target_count)
+"""
+if old in s:
+    open(p, "w", encoding="utf-8").write(s.replace(old, new))
+    echo "  patched vendor simplify (trimesh API compat)"
+PYEOF
+fi
+
 # 8) Real-ESRGAN upscaler weights -> ckpt/ (paint stage, relative to CWD)
 mkdir -p ckpt
 if [ ! -f ckpt/RealESRGAN_x4plus.pth ]; then
