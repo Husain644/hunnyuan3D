@@ -44,10 +44,11 @@ uv venv --python "$PY_VER" "$VENV_DIR"
 PY="$VENV_DIR/bin/python"
 "$PY" -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
 
-# 4) Core deps: torch cu124 + app requirements.txt
+# 4) Core deps: torch cu124 then the app's requirements (from PyPI/mirror —
+#    the cu124 index only carries torch/torchvision packages).
 uv pip install --python "$PY" --index-url "$CU124" \
   torch==2.5.1 torchvision==0.20.1
-uv pip install --python "$PY" --index-url "$CU124" \
+uv pip install --python "$PY" --index-url "$MIRROR" \
   --no-build-isolation -r requirements.txt
 
 # 5) vendored custom_rasterizer (paint stage) — must be built for THIS gpu
