@@ -69,6 +69,17 @@ uv pip install --python "$PY" --index-url "$MIRROR" \
   basicsr==1.4.2 realesrgan==0.3.0 \
   addict yapf future lmdb fast-simplification --no-deps
 
+# 6b) vendored DifferentiableRenderer C++ inpaint extension (meshVerticeInpaint)
+#     Texture jobs die with 'name meshVerticeInpaint is not defined' unless this
+#     is built (the .cpp ships unbuilt and import is behind a bare except).
+uv pip install --python "$PY" pybind11
+( cd vendor/Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer \
+  && SUF="$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')" \
+  && [ -f "mesh_inpaint_processor$SUF" ] || \
+     c++ -O3 -Wall -shared -std=c++11 -fPIC \
+       $("$PY" -m pybind11 --includes) \
+       mesh_inpaint_processor.cpp -o "mesh_inpaint_processor$SUF" )
+
 # 7) basicsr 1.4.2 <-> torchvision 0.20 compat patch
 BS="$VENV_DIR/lib/python3.11/site-packages/basicsr/data/degradations.py"
 sed -i "s/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/" "$BS"
