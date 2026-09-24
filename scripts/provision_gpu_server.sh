@@ -51,7 +51,10 @@ uv pip install --python "$PY" --index-url "$CU124" \
 uv pip install --python "$PY" --index-url "$MIRROR" \
   --no-build-isolation -r requirements.txt
 
-# 5) vendored custom_rasterizer (paint stage) — must be built for THIS gpu
+# 5) vendored custom_rasterizer (paint stage) — must be built for THIS gpu.
+#    --no-build-isolation needs setuptools (+ its extra antlr4 build dep) in
+#    the venv; otherwise uv aborts.
+uv pip install --python "$PY" --index-url "$MIRROR" setuptools antlr4-python3-runtime
 ( cd vendor/Hunyuan3D-2.1/hy3dpaint/custom_rasterizer \
     && TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
        UV_CACHE_DIR=/root/.uv-cache uv pip install --python "$PY" \
