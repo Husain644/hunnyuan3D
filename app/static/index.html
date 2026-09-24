@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta http-equiv="Cache-Control" content="no-store"/>
+<meta http-equiv="Pragma" content="no-cache"/>
 <title>Hunyuan3D 2.1 / 2mv — Image to GLB</title>
 <style>
   :root{
@@ -279,8 +281,10 @@
 </div>
 
 <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
-<script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
 <script>
+  window.addEventListener('error', e => {
+    try{ if(typeof showErr==='function') showErr('JS error: '+(e.message||'unknown')); }catch(_){}
+  }, false);
   const $ = id => document.getElementById(id);
   const drop=$('drop'), input=$('fileInput');
   let model = '2.1';
@@ -696,8 +700,21 @@
     inp.click();
   }
 
+  let zipPromise = null;
+  function ensureZip(){
+    if(window.JSZip) return Promise.resolve(true);
+    if(zipPromise) return zipPromise;
+    zipPromise = new Promise(res=>{
+      const s=document.createElement('script');
+      s.src='https://unpkg.com/jszip@3.10.1/dist/jszip.min.js';
+      s.onload=()=>res(true); s.onerror=()=>res(false);
+      document.head.appendChild(s);
+    });
+    return zipPromise;
+  }
+
   async function downloadAll(){
-    if(!window.JSZip){ log('ZIP library still loading — retry in a second','wait'); return; }
+    if(!await ensureZip()){ showErr('Could not load ZIP library (network blocked). Per-item ⬇ still works.'); return; }
     const ok=queue.filter(q=>q.status==='ok'&&q.blobUrl);
     if(!ok.length){ showErr('No finished GLBs to download yet.'); return; }
     const zip=new JSZip();
