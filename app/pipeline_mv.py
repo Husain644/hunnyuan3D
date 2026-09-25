@@ -36,6 +36,7 @@ from .pipeline import (
     Hunyuan3DError,
     PipelineResult,
     _decode_base64,
+    _free_host_memory,
     _rand_suffix,
     _repo_dirs,
     _square,
@@ -257,9 +258,10 @@ class Hunyuan3DMVPipeline:
         except Exception as exc:  # noqa: BLE001
             raise Hunyuan3DError(f"2mv shape stage failed: {exc}") from exc
         finally:
-            self.gpu.force_offload(shape_pipe)
+            self.gpu.release(shape_pipe)
             self._shape = None
             self.gpu.empty_cache()
+            _free_host_memory()
 
         if mesh is None:
             raise Hunyuan3DError("2mv shape stage returned no mesh.")

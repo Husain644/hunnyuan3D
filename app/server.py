@@ -46,7 +46,7 @@ from .schemas import (
     JobOut,
     JobStatus,
 )
-from .storage import MemoryStorage, Storage
+from .storage import MemoryStorage, PayloadStore, Storage
 import app.gpu_manager as gpu_module
 
 logger = logging.getLogger("hy3d.server")
@@ -67,6 +67,14 @@ async def lifespan(_app: FastAPI):
     JOBS.start(LOOP)
     PUBLIC_JOBS.start(LOOP)
     task = asyncio.create_task(_public_sweeper())
+
+    # Re-queue in-flight jobs that were persisted to disk (crash/restart
+    # recovery), so a restart never silently auto-cancels a user's job.
+    for _mgr in (JOBS, PUBLIC_JOBS):
+        try:
+            _mgr.recover()
+        except Exception:  # noqa: BLE001
+            logger.exception("job recovery failed")
 
     # Startup banner: which checkpoints are actually available to serve.
     try:
@@ -200,7 +208,12 @@ async def _execute_job(job_id: str, payload: dict) -> dict:
     }
 
 
-JOBS = JobManager(STORAGE, _execute_job, max_active=_SLOTS)
+# One worker slot shared across BOTH queue managers so the public page and the
+# internal API can never drive two heavy pipelines into VRAM at the same time.
+_GLOBAL_SLOT = asyncio.Semaphore(_SLOTS)
+
+JOBS = JobManager(STORAGE, _execute_job, max_active=_SLOTS, global_slot=_GLOBAL_SLOT,
+                  records=PayloadStore(SETTINGS.job_dir / "recovery_internal"))
 
 
 # --------------------------------------------------------------------------
@@ -280,7 +293,8 @@ async def _execute_job_public(job_id: str, payload: dict) -> dict:
 
 
 PUBLIC_JOBS = JobManager(PUBLIC_STORAGE, _execute_job_public,
-                         max_active=_SLOTS)
+                         max_active=_SLOTS, global_slot=_GLOBAL_SLOT,
+                         records=PayloadStore(SETTINGS.job_dir / "recovery"))
 
 
 async def _public_sweeper() -> None:
@@ -534,6 +548,36 @@ async def health() -> HealthOut:
         ),
         disk_free_gb=_disk_free_gb(),
     )
+
+
+@app.post("/v1/reset", include_in_schema=False)
+async def reset_server() -> dict:
+    """In-page "reset": clear leftover/stuck jobs and free GPU memory without
+    restarting the process."""
+    cleared = JOBS.reset() + PUBLIC_JOBS.reset()
+    released = 0
+    async with _POOL_LOCK:
+        for pool in (_PIPELINE_POOL, _MV_POOL):
+            for _i in range(len(pool)):
+                pipe = pool.popleft()
+                unload = getattr(pipe, "_unload_all", None)
+                if callable(unload):
+                    try:
+                        unload()
+                        released += 1
+                    except Exception:  # noqa: BLE001
+                        logger.exception("reset: pipeline unload failed")
+                pool.append(pipe)
+    GpuManager.empty_cache()
+    info = gpu_info()
+    logger.info("Reset: cleared %d job(s), unloaded %d pipeline(s)",
+                cleared, released)
+    return {
+        "cleared": cleared,
+        "pipelines_unloaded": released,
+        "vram_used_gb": info.used_gb if info.available else None,
+        "vram_free_gb": info.free_gb if info.available else None,
+    }
 
 
 @app.get("/health/models")

@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import importlib
 import io
+import gc
 import logging
 import os
 import sys
 import threading
 import traceback
+from ctypes import CDLL
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -349,31 +351,50 @@ class Hunyuan3DPipeline:
             self._paint = Hunyuan3DPaintPipeline(cfg)
         return self._paint
 
+    def _log_vram(self, tag: str) -> None:
+        try:
+            torch = _torch()
+            if torch is not None and torch.cuda.is_available():
+                a = torch.cuda.memory_allocated() / 1e9
+                r = torch.cuda.memory_reserved() / 1e9
+                m = torch.cuda.max_memory_allocated() / 1e9
+                logger.info(
+                    "vram[%s] allocated=%.2fG reserved=%.2fG process_peak=%.2fG",
+                    tag, a, r, m,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     # -- lifecycle ----------------------------------------------------------
     def _load_stage(self, stage: str, builder) -> Any:
         """Load one stage under its GPU budget lock, freeing prior stages."""
         for other in ("shape", "tex"):
             if other != stage and getattr(self, f"_{other}", None) is not None:
                 model = getattr(self, f"_{other}")
-                self.gpu.force_offload(model)
+                self.gpu.release(model)
                 setattr(self, f"_{other}", None)
+        self.gpu.empty_cache()
+        _free_host_memory()
+        self._log_vram(f"before {stage}")
         with self.gpu.stage_lock(stage):
             self.gpu.empty_cache()
             obj = builder()
             self.gpu.mark_resident(stage, type(obj).__name__)
             self.gpu.empty_cache()
+            self._log_vram(f"after {stage}")
             return obj
 
     def _unload_all(self) -> None:
         for stage in ("shape", "tex"):
             model = getattr(self, f"_{stage}", None)
             if model is not None:
-                self.gpu.force_offload(model)
+                self.gpu.release(model)
                 setattr(self, f"_{stage}", None)
         if self._rembg is not None:
-            self.gpu.force_offload(self._rembg)
+            self.gpu.release(self._rembg)
             self._rembg = None
         self.gpu.empty_cache()
+        _free_host_memory()
 
     # -- preprocessing ------------------------------------------------------
     def _preprocess(self, image: Image.Image) -> Image.Image:
@@ -461,9 +482,10 @@ class Hunyuan3DPipeline:
             raise Hunyuan3DError(f"Shape stage failed: {exc}") from exc
         finally:
             # Free the DiT before pulling paint into VRAM.
-            self.gpu.force_offload(shape_pipe)
+            self.gpu.release(shape_pipe)
             self._shape = None
             self.gpu.empty_cache()
+            _free_host_memory()
 
         if mesh is None:
             raise Hunyuan3DError("Shape stage returned no mesh.")
@@ -526,9 +548,10 @@ class Hunyuan3DPipeline:
             except Exception as exc:  # noqa: BLE001
                 raise Hunyuan3DError(f"Texture stage failed: {exc}") from exc
             finally:
-                self.gpu.force_offload(paint_pipe)
+                self.gpu.release(paint_pipe)
                 self._paint = None
                 self.gpu.empty_cache()
+                _free_host_memory()
             mesh = textured_mesh
         else:
             report("texture", 0.95)  # skipped
@@ -575,6 +598,7 @@ class Hunyuan3DPipeline:
         report("export", 1.0)
         self.stats["jobs"] += 1
         self._unload_all()
+        _free_host_memory()
         return PipelineResult(
             glb_path=out_path,
             mesh_faces=int(getattr(mesh, "faces", None).shape[0]) if getattr(mesh, "faces", None) is not None else 0,
@@ -621,3 +645,17 @@ def _rand_suffix() -> str:
     import time
 
     return f"{int(time.time()*1000):x}{threading.get_ident():x}"
+
+
+def _free_host_memory() -> None:
+    """Return cached Python/heap memory to the OS (glibc malloc_trim).
+
+    PyTorch keeps CPU arenas around after model loads even when their tensors
+    are gone; on RAM-capped boxes that bloats RSS and trips the cgroup OOM
+    killer on multi-GB models. Called after every stage unload.
+    """
+    gc.collect()
+    try:
+        CDLL("libc.so.6").malloc_trim(0)
+    except Exception:  # noqa: BLE001
+        pass

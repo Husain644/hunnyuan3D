@@ -1,19 +1,104 @@
 """GLB + thumbnails persistence."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger("hy3d.storage")
 
 
 def _safe_name(job_id: str) -> str:
     return "".join(c for c in job_id if c.isalnum() or c in "_-.") or "job"
+
+
+class PayloadStore:
+    """Disk-backed record of in-flight job payloads, for restart recovery.
+
+    Only jobs that are still QUEUED/RUNNING are kept; the record is removed
+    the moment a job reaches a terminal state. Payload images (bytes) are
+    base64-encoded so the whole record is a single JSON file::
+
+        recovery/{job_id}.json   -> {"payload": {...}, "state": {...}}
+    """
+
+    def __init__(self, dir: Path) -> None:
+        self.dir = Path(dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def _path(self, job_id: str) -> Path:
+        return self.dir / f"{_safe_name(job_id)}.json"
+
+    @staticmethod
+    def _encode(payload: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k, v in payload.items():
+            if isinstance(v, bytes):
+                out[k] = {"$bin": base64.b64encode(v).decode("ascii")}
+            elif isinstance(v, dict):
+                out[k] = PayloadStore._encode(v)
+            else:
+                out[k] = v
+        return out
+
+    @staticmethod
+    def _decode(record: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k, v in record.items():
+            if isinstance(v, dict) and set(v) == {"$bin"} and isinstance(v.get("$bin"), str):
+                out[k] = base64.b64decode(v["$bin"])
+            elif isinstance(v, dict):
+                out[k] = PayloadStore._decode(v)
+            else:
+                out[k] = v
+        return out
+
+    def save(self, job_id: str, payload: dict[str, Any], state: dict[str, Any]) -> None:
+        data = json.dumps(
+            {"payload": self._encode(payload), "state": state},
+            ensure_ascii=False,
+        )
+        with self._lock:
+            tmp = self._path(job_id).with_suffix(".json.tmp")
+            tmp.write_text(data, encoding="utf-8")
+            tmp.replace(self._path(job_id))
+
+    def load(self, job_id: str) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+        p = self._path(job_id)
+        if not p.exists():
+            return None
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+            return self._decode(rec.get("payload") or {}), rec.get("state") or {}
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Corrupt recovery record for %s", job_id)
+            return None
+
+    def iter_records(self) -> Iterable[tuple[str, dict[str, Any], dict[str, Any]]]:
+        with self._lock:
+            names = [p.name for p in self.dir.glob("*.json")]
+        for name in names:
+            job_id = _safe_name(Path(name).stem)
+            try:
+                rec = json.loads((self.dir / name).read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            yield job_id, self._decode(rec.get("payload") or {}), rec.get("state") or {}
+
+    def discard(self, job_id: str) -> None:
+        with self._lock:
+            p = self._path(job_id)
+            if p.exists():
+                p.unlink(missing_ok=True)
+            t = p.with_suffix(".json.tmp")
+            if t.exists():
+                t.unlink(missing_ok=True)
 
 
 class Storage:

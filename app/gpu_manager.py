@@ -156,6 +156,36 @@ class GpuManager:
         logger.info("Forced offload of %s to %s", type(model).__name__, device)
 
     @staticmethod
+    def release(model) -> None:
+        """Free a torch module's parameters/buffers in place (GPU + CPU).
+
+        Whereas ``force_offload`` moves every tensor to CPU (which has to
+        *first* allocate host RAM equal to the model size, then release the
+        CUDA copy — a moment of double residency that OOMs small-RAM boxes),
+        ``release`` nulls the tensors directly and empties the CUDA cache, so
+        no CPU copy is ever made. Exact for models we will never touch again.
+        """
+        torch = _torch()
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            mods = list(model.modules()) if callable(getattr(model, "modules", None)) else []
+        except Exception:  # noqa: BLE001
+            mods = []
+        if not mods:
+            mods = [model]
+        for m in mods:
+            for container in (getattr(m, "_parameters", None),
+                              getattr(m, "_buffers", None)):
+                for k in list(container or {}):
+                    if isinstance(container[k], torch.Tensor):
+                        container[k] = None
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        logger.info("Released %s from GPU+CPU", type(model).__name__)
+
+    @staticmethod
     def recommended_chunk() -> int:
         """VAE decode chunk hint: lower on small cards to cut peak VRAM."""
         info = gpu_info()

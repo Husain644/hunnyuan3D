@@ -267,6 +267,13 @@
         taken at the same height for the most accurate result. Front is required; the rest are optional.
         <b>2.1</b> needs a single image — drag in several to queue a batch.
       </div>
+      <div class="queuemn" style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button id="gpuResetBtn" class="addBtn"
+          title="Cancel stuck/leftover tasks and free GPU memory in the running server (no restart)">
+          ↻ Reset server (free GPU memory)
+        </button>
+        <small id="gpuResetMsg"></small>
+      </div>
     </div>
   </div>
 
@@ -466,6 +473,25 @@
   }
   setInterval(tickStats,3000);
   tickStats();
+
+  /* ---------- in-page server GPU reset ---------- */
+  $('gpuResetBtn').addEventListener('click', async ()=>{
+    const btn=$('gpuResetBtn'), msg=$('gpuResetMsg');
+    if(btn.disabled) return;
+    if(!confirm('Reset the running server?\n\nCancels any queued/running jobs and frees GPU memory without restarting. Local queue items will need to be generated again.')) return;
+    btn.disabled=true; msg.textContent='resetting…';
+    try{
+      const r=await fetch('/v1/reset',{method:'POST'});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const j=await r.json();
+      msg.textContent=`cleared ${j.cleared} job(s) · freed ${j.vram_free_gb} GB VRAM`;
+    }catch(e){
+      msg.textContent='reset failed';
+      showErr('Reset failed: '+(e.message||'unknown'));
+    }
+    btn.disabled=false;
+    tickStats();
+  });
 
   let worker = null;
   async function pump(){
